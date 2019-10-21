@@ -1,0 +1,50 @@
+
+Start		-> Regex
+
+Regex		->	Empty
+			|	Chars
+			|	Group
+			|	CharClass
+			|	Kleene
+			|	Not
+			|	Alt
+			|	Cat
+
+Empty		->	''
+
+Char		->	<a single ascii symbol>
+			| 	'\' 't'
+			| 	'\' 'n'
+			| 	'\' '\'
+
+Chars		->	Char
+			|	Char Chars
+
+Group		-> '(' Regex ')'
+
+CharClass	->	'[' RangeList ']'
+			|	'[' '^' RangeList ']'
+
+Range		->	Chars
+			|	Chars '-' Char
+
+RangeList	->	Range
+			|	RangeList Range
+
+Atom		->	Chars
+			|	Group
+			|	CharClass
+			|	'.'
+
+Kleene		->	Atom
+			|	Kleene '+'
+			|	Kleene '*'
+
+Not			-> 	Kleene
+			|	'~' Not
+
+Alt			->	Not
+			|	Not '|' Alt
+
+Cat			->	Alt
+			|	Alt Cat
