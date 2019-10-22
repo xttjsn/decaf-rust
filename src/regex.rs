@@ -101,12 +101,9 @@ impl<I: Iterator<Item=char>> Parser<I> {
 
 	fn cat(&mut self) -> Res<Regex<char>> {
 		let mut rs = vec![self.alt()?];
-		// DONE: on a second thought, I probably wouldn't need the loop here
-		// DONE: try removing the loop layer later
-		// Ok, so the loop here is to avoid recursion
 		loop {
 			match self.it.peek() {
-				Some(_c) => rs.push(self.alt()?),
+				Some(&c) if Parser::<I>::cat_first(c) => rs.push(self.alt()?),
 				_ => break,
 			}
 		}
@@ -120,6 +117,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				Some(&'|') => { self.it.next(); rs.push(self.not()?) }
 				_ => break,
 			}
+
 		}
 		return Ok(Alt(rs, self.next_id()));
 	}
@@ -147,6 +145,11 @@ impl<I: Iterator<Item=char>> Parser<I> {
 			}
 		}
 		Ok(rs)
+	}
+
+	fn cat_first(c : char) -> bool {
+		c != ']' && c != '|' && c != '+'
+			&& c != '*' && c != ')'
 	}
 
 	fn char_first(c : char) -> bool {
@@ -218,7 +221,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				self.it.next();
 				let r = self.cat()?;
 				match self.it.peek() {
-					Some(&')') => Ok(r),
+					Some(&')') => { self.it.next(); Ok(r) }
 					Some(&c) => Err(UnexpectedCharError("bad character for group end", c)),
 					_ => Err(UnexpectedEOFError("unmatched '('"))
 				}
@@ -248,7 +251,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				}
 
 				match self.it.peek() {
-					Some(&']') => Ok(rs),
+					Some(&']') => { self.it.next(); Ok(rs) }
 					Some(&c) => Err(UnexpectedCharError("bad character for character class", c)),
 					None => Err(UnexpectedEOFError("unmatched ']'"))
 				}
