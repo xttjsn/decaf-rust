@@ -1,5 +1,8 @@
-mod regex;
+use decaf::regex_parse;
+
+regex_parse! {
+	"abc.*"
+}
+
 fn main() {
-	let mut v: Vec<_> = vec![1, 2, 3];
-	v.remove(0);
 }

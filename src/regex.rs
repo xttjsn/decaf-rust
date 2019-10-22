@@ -1,7 +1,10 @@
 use self::Regex::*;
 use self::ParseError::*;
 use std::iter::Peekable;
-use std::char;
+use std::{char, str, fmt};
+use syn::parse::{Parse, ParseStream};
+use syn::{LitStr};
+use syn;
 /*
 
 Start		-> Regex
@@ -54,15 +57,15 @@ Alt			->	Not
 Cat			->	Alt
 			|	Alt Cat
  */
-#[derive(Clone)]
+#[derive(PartialOrd, Ord, PartialEq, Eq, Debug, Clone)]
 pub enum Regex<T> {
-    Null, 								// Match Nothing
-    Empty, 								// Match empty string ""
-    Chars(Vec<T>),						// Match the character sequence
-    Kleene(Box<Regex<T>>),				// Match zero or more regexes
-    Cat(Vec<Regex<T>>),					// Match the concatenation of the regexes
-    Not(Box<Regex<T>>),					// Match anything other than the regexes
-    Alt(Vec<Regex<T>>),					// Match any regexes listed
+    Null(u64), 									// Match nothing
+	Empty(u64),									// Match empty string
+    Chars(Vec<T>, u64),							// Match the character sequence
+    Kleene(Box<Regex<T>>, u64),					// Match zero or more regexes
+    Cat(Vec<Regex<T>>, u64),					// Match the concatenation of the regexes
+    Not(Box<Regex<T>>, u64),					// Match anything other than the regexes
+    Alt(Vec<Regex<T>>, u64),					// Match any regexes listed
 }
 
 pub enum ParseError {
@@ -72,13 +75,30 @@ pub enum ParseError {
 	NotImplementedError,
 }
 
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            UnexpectedEOFError(s) => write!(f, "{}", s),
+            UnexpectedCharError(s, c) => write!(f, "{}: `{}`", s, c),
+            UnexpectedRangeError(s, c, d) => write!(f, "{}: `{}-{}`", s, c, d),
+			NotImplementedError => write!(f, "feature not implemented")
+        }
+    }
+}
+
 type Res<T> = Result<T, ParseError>;
 
 struct Parser<I: Iterator<Item=char>> {
 	it: Peekable<I>,
+    rid: u64
 }
 
 impl<I: Iterator<Item=char>> Parser<I> {
+	fn next_id(&mut self) -> u64 {
+		self.rid += 1;
+		self.rid
+	}
+
 	fn cat(&mut self) -> Res<Regex<char>> {
 		let mut rs = vec![self.alt()?];
 		// DONE: on a second thought, I probably wouldn't need the loop here
@@ -90,7 +110,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				_ => break,
 			}
 		}
-		return Ok(Cat(rs))
+		return Ok(Cat(rs, self.next_id()))
 	}
 
 	fn alt(&mut self) -> Res<Regex<char>> {
@@ -101,12 +121,12 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				_ => break,
 			}
 		}
-		return Ok(Alt(rs));
+		return Ok(Alt(rs, self.next_id()));
 	}
 
 	fn not(&mut self) -> Res<Regex<char>> {
 		match self.it.peek() {
-			Some(&'~') => { self.it.next(); Ok(Not(Box::new(self.not()?))) }
+			Some(&'~') => { self.it.next(); Ok(Not(Box::new(self.not()?), self.next_id())) }
 			_ => self.kleene()
 		}
 	}
@@ -117,11 +137,11 @@ impl<I: Iterator<Item=char>> Parser<I> {
 			match self.it.peek() {
 				Some(&'+') => {
 					self.it.next();
-					rs = Cat(vec![rs.clone(), Kleene(Box::new(rs))])
+					rs = Cat(vec![rs.clone(), Kleene(Box::new(rs), self.next_id())], self.next_id())
 				}
 				Some(&'*') => {
 					self.it.next();
-					rs = Kleene(Box::new(rs))
+					rs = Kleene(Box::new(rs), self.next_id())
 				}
 				_ => break,
 			}
@@ -133,7 +153,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 		c != '[' && c != ']' && c != '|'
 			&& c != '+' && c != '*'
 			&& c != '(' && c != ')'
-			&& c != '~'
+			&& c != '~' && c != '.'
 	}
 
 	fn char_group(c : char) -> bool {
@@ -146,7 +166,8 @@ impl<I: Iterator<Item=char>> Parser<I> {
 			Some(&'[') => self.char_class(),
 			Some(&'.') => {
 				self.it.next();
-				Ok(Not(Box::new(Null)))
+				let tmp = Ok(Not(Box::new(Null(self.next_id())), self.next_id()));
+				return tmp;
 			}
 			Some(&c) if	Parser::<I>::char_first(c) => self.chars(),
 			Some(&c) => Err(UnexpectedCharError("bad character for atom", c)),
@@ -159,8 +180,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 		loop {
 			match self.it.peek() {
 				Some(&c) if	Parser::<I>::char_first(c) => {
-					self.it.next();
-					rs.push(c);
+					rs.push(self.char()?);
 				}
 				_ => break,
 			}
@@ -172,7 +192,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 					None => Err(UnexpectedEOFError("chars not nullable"))
 				}
 			}
-			_ => Ok(Chars(rs))
+			_ => Ok(Chars(rs, self.next_id()))
 		}
 	}
 
@@ -196,7 +216,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 		match self.it.peek() {
 			Some(&'(') => {
 				self.it.next();
-				let mut r = self.cat()?;
+				let r = self.cat()?;
 				match self.it.peek() {
 					Some(&')') => Ok(r),
 					Some(&c) => Err(UnexpectedCharError("bad character for group end", c)),
@@ -209,7 +229,7 @@ impl<I: Iterator<Item=char>> Parser<I> {
 	}
 
 	fn char_class(&mut self) -> Res<Regex<char>> {
-		let mut rs;
+		let rs;
 		match self.it.peek() {
 			Some(&'[') => {
 				self.it.next();
@@ -217,9 +237,9 @@ impl<I: Iterator<Item=char>> Parser<I> {
 				match self.it.peek() {
 					Some(&'^') => {
 						self.it.next();
-						rs = Not(Box::new(self.range()?));
+						rs = Not(Box::new(self.range()?), self.next_id());
 					}
-					Some(&c) => {
+					Some(&_) => {
 						rs = self.range()?;
 					}
 					None => {
@@ -252,19 +272,56 @@ impl<I: Iterator<Item=char>> Parser<I> {
 						let d = self.char()?;
 						for x in (c as u64)..(d as u64 + 1) {
 							if let Some(x) = char::from_u32(x as u32) {
-								v.push(Chars(vec![x]));
+								v.push(Chars(vec![x], self.next_id()));
 							} else {
 								return Err(UnexpectedRangeError("range contains bad code points", c, d));
 							}
 						}
 					} else {
-						v.push(Chars(vec![c]));
+						v.push(Chars(vec![c], self.next_id()));
 					}
 				}
 				_ => break,
 			}
 		}
-		Ok(Alt(v))
+		Ok(Alt(v, self.next_id()))
 	}
+
+	fn parse(it : I) -> Res<Regex<char>> {
+		let mut parser = Parser { it: it.peekable(), rid: 0 };
+		let r = parser.cat()?;
+		if let Some(c) = parser.it.next() {
+			Err(UnexpectedCharError("bad character in regex", c))
+		} else {
+			Ok(r)
+		}
+	}
+}
+
+impl Parse for Regex<char> {
+	fn parse(input: ParseStream) -> syn::Result<Regex<char>> {
+		let regex_src : LitStr = input.parse()?;
+		match regex_src.value().parse() {
+			Ok(r) => {
+				Ok(r)
+			}
+			Err(er) => {
+				regex_src
+					.span()
+					.unstable()
+					.error(format!("invalid regular expression: {}", er))
+					.emit();
+				Ok(Null(0))
+			}
+		}
+	}
+}
+
+impl str::FromStr for Regex<char> {
+    type Err = ParseError;
+    /// Parse a string as a regular expression.
+    fn from_str(s: &str) -> Result<Regex<char>, ParseError> {
+        Parser::parse(s.chars())
+    }
 }
 
