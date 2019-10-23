@@ -1,7 +1,7 @@
 use decaf::regex_parse;
 
 regex_parse! {
-	"prefix[a-c0-9]*(ab|c)|q+"
+	"(prefix1)(prefix2)[a-c0-9]*(ab|c)|q+"
 }
 
 fn main() {

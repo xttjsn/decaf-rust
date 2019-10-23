@@ -2,6 +2,7 @@ use self::Regex::*;
 use self::ParseError::*;
 use std::iter::Peekable;
 use std::{char, str, fmt};
+use crate::dfa::Normalize;
 use syn::parse::{Parse, ParseStream};
 use syn::{LitStr};
 use syn;
@@ -328,3 +329,90 @@ impl str::FromStr for Regex<char> {
     }
 }
 
+impl Normalize for Regex<char> {
+	fn normalize(self) -> Self {
+		match self {
+			Null(_) => self,
+			Empty(_) => self,
+			Chars(_, __) => self,
+			Kleene(r, id) => {
+				match *r {
+					// Flatten it
+					Kleene(sr, _) => Kleene(Box::new(sr.normalize()), id),
+
+					Null(_) | Empty(_) => Kleene(Box::new(r.normalize()), id),
+
+					Chars(_, __) | Cat(_, __) | Alt(_, __) | Not(_, __) => Kleene(Box::new(r.normalize()), id),
+				}
+			}
+			Cat(mut rs, id) => {
+				// First pass, normalize all children
+				rs = rs.normalize();
+
+				// Second pass, vertically merge all "Cat"s
+				let mut vs = Vec::new();
+				for r in rs.into_iter() {
+					match r {
+						Cat(sub_rs, _) => { vs.extend(sub_rs); }
+						_ => { vs.push(r); }
+					}
+				}
+
+				// Third pass, horizontally merge all adjacent "Chars"s
+				let mut tvs: Vec<Regex<char>> = Vec::new();
+				for r in vs.into_iter() {
+					// If there's at least one element
+					if let Some(last) = tvs.pop() {
+						match (last, r) {
+							(Chars(mut lhs, id), Chars(rhs, _)) => {
+								lhs.extend(rhs);
+								tvs.push(Chars(lhs, id));
+							},
+							(x, y) => {
+								tvs.push(x);
+								tvs.push(y);
+							}
+						}
+					} else {
+						tvs.push(r);
+					}
+				}
+
+				// Remove Cat if there's only one child
+				if tvs.len() == 1 {
+					tvs.pop().unwrap()
+				} else {
+					Cat(tvs, id)
+				}
+			}
+			Not(br, _) => {
+				let r = br.normalize();
+				if let Not(nr, _) = r {
+					*nr
+				} else {
+					r
+				}
+			}
+			Alt(mut rs, id) => {
+				// Normalize children
+				rs = rs.normalize();
+
+				// Second pass, vertically merge all "Alt"s
+				let mut vs = Vec::new();
+				for r in rs.into_iter() {
+					match r {
+						Alt(sub_rs, _) => { vs.extend(sub_rs); }
+						_ => { vs.push(r); }
+					}
+				}
+
+				// Remove Alt if there's only one child
+				if vs.len() == 1 {
+					vs.pop().unwrap()
+				} else {
+					Alt(vs, id)
+				}
+			}
+		}
+	}
+}
