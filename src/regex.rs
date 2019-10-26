@@ -6,6 +6,7 @@ use crate::dfa::Normalize;
 use syn::parse::{Parse, ParseStream};
 use syn::{LitStr};
 use syn;
+use std::collections::BTreeSet;
 /*
 
 Start		-> Regex
@@ -73,12 +74,11 @@ pub enum ParseError {
     UnexpectedCharError(&'static str, char),
     UnexpectedEOFError(&'static str),
 	UnexpectedRangeError(&'static str, char, char),
-	NotImplementedError,
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
+        match self {
             UnexpectedEOFError(s) => write!(f, "{}", s),
             UnexpectedCharError(s, c) => write!(f, "{}: `{}`", s, c),
             UnexpectedRangeError(s, c, d) => write!(f, "{}: `{}-{}`", s, c, d),
@@ -340,7 +340,7 @@ impl Normalize for Regex<char> {
 					// Flatten it
 					Kleene(sr, _) => Kleene(Box::new(sr.normalize()), id),
 
-					Null(_) | Empty(_) => Kleene(Box::new(r.normalize()), id),
+					Null(rid) | Empty(rid) => Empty(rid),
 
 					Chars(_, __) | Cat(_, __) | Alt(_, __) | Not(_, __) => Kleene(Box::new(r.normalize()), id),
 				}
@@ -410,7 +410,23 @@ impl Normalize for Regex<char> {
 				if vs.len() == 1 {
 					vs.pop().unwrap()
 				} else {
-					Alt(vs, id)
+                    let mut chars = BTreeSet::new();
+                    let mut others = Vec::new();
+                    let mut nid = 0;
+                    for r in vs.into_iter() {
+                        if let Chars(cs, cid) = r {
+                            for c in cs.into_iter() {
+                                chars.insert(c);
+                            }
+                            nid = cid;
+                        } else {
+                            others.push(r);
+                        }
+                    }
+                    if !chars.is_empty() {
+                        others.push(Chars(chars.into_iter().collect(), nid));
+                    }
+                    Alt(others, id)
 				}
 			}
 		}

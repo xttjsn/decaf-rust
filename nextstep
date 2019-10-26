@@ -1,0 +1,61 @@
+Here's how we're going to implement regex's dfa
+
+First, we're going to implement derivatives
+
+Each derivative is essentially a map from a set of characters to  another derivative.
+
+Essentially, derivatives become the state of the dfa.
+
+Next, we'll implement the equality check function for derivatives.
+
+Then, we'll define the ype of  the transition function, which is F : (State, char) -> State
+
+Next, we'll need a mechanism for managing regex vectors. Essentially, the state of the dfa now becomes regex vectors. We'll also need to be able to know which element of regex vectors enters the accept state.
+
+If we number every regex listed and have map from the index of regex to the code it corresponds to, then by looking at the index of accepting state we know which code to run.
+
+However, each regex will be transformed to derivatives, which makes indexing hard.
+
+If we have 10 regexes, it'll be like having 10 DFA's running concurrently. The derivative of this joint DFA is simply the set of all derivatives of separate DFAs. The derivative class of a state of the joint DFA is the intersection of all the derivatives classes of the corresponding state of all individual DFA.
+
+So, if the derivative looks like this, how would we compute derivative classes and when should we compute derivative classes?
+
+We can do it on demand because the dfa-generating algorithm is a fixed point algorithm, therefore we won't be doing replicating stuff.
+
+So given a derivative/state/regex, we must be able to generate its derivative classes. We can use some memory to remember intemediate result, as long as our derivative is hashable.
+
+OK.!
+
+TODOs:
+
+1. Correctly implement Null vs Empty
+2. Define and implement the Derivative class and the derivative() function.
+3. Define and implement a function that returns the derivative classes given a derivative/state/regex
+4. Stitch them up and implement the goto, explore and mkDFA function.
+5. Write a few test examples (e.g. return this value for this regex and that value for that regex, then assert which value returned given which regex).
+6. Define decaf token types, value types, token regexes, then implement decaf lexer.
+
+--- Parser
+
+Read again and decide to implement LALR(1) or LR(1): probably LR(1)
+
+tentative TODOs:
+1. Define the data structure to store the grammar: maybe using proc_macro again.
+2. Define the type for canonical collection, and the concept of position for those grammar items.
+3. Outline the grammar parsing routines.
+4. Formulate and implement the canonical collection traverse function.
+5. Define the types for action tables and goto tables
+6. Define and implement the LR(1) routine's framework -- how do you use the action table and goto table.
+7. Define the type for parse tree -- this is the end result of this step.
+
+--- AST
+
+With Steve's handout as reference, define the complete list of types of all possible AST nodes (e.g. const, various operations, classes).
+
+Ttentative TODOs
+1. Convert http://cs.brown.edu/courses/csci1260/decaf_ast.pdf to rust enums.
+# 2. Define routines that converts parse tree nodes to AST nodes
+3. Define the data structure for symbol table: class symbol table, method symbol table, field symbol table. Both method symbol table and field symbol table are specific to specific class. Each method symbol should also contain a variable symbol tabl (maybe each code scope within a method should also have such a symbol table?)
+4. Outline and implement the two-pass AST-generating routine.
+   1. parse input, process all declarations, build the AST (probably leave un-resolved symbol as it is), build the symbol table along the way.
+   2. go through the AST again and resolve all symbols, report error if symbol not defined.
