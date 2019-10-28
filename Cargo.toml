@@ -10,12 +10,5 @@ name = "decaf"
 proc-macro = true
 path = "src/lib.rs"
 
-[[bin]]
-name = "decaf-main"
-path = "src/main.rs"
-
 [dependencies]
-proc-macro2 = { version = "0.4.3", features = ["nightly"] }
-syn = { version = "0.15.36", features = ["extra-traits", "full"] }
-quote = "0.6.0"
-dot = "0.1.4"
+plex = "0.2.5"
