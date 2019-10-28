@@ -18,6 +18,7 @@ use dfa::Normalize;
 mod regex;
 mod lexer;
 mod viz;
+mod derivative;
 
 #[proc_macro]
 pub fn regex_parse(input: proc_macro::TokenStream) -> proc_macro::TokenStream {

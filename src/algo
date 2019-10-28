@@ -1,0 +1,31 @@
+go(v, f, cs):
+    if v.len() == 0:
+	    return {{}, None}
+	first_de, rest_de = v.split_at(1)
+	result = []
+	for rule in first_de.rules():
+	    rule_chars = rule.chars()
+		inter_chars = intersect(rule_chars, cs)
+		deriv = go(rest_de, f, inter_chars)
+		# derive now contains the rule for a subset of cs
+		result.push(deriv)
+	return { result, }
+
+
+# Brute force
+combine(vs, f) -> Derivative:
+    first_deriv, rest_deriv = vs.split_at(1)
+	result = combine(rest_deriv, f)
+	# Now combine two derivatives
+	for rule in first_deriv.rules():
+	    for other_rule in result.rules():
+		    rule_chars = rule.chars()
+			other_chars = other_rule.chars()
+			inter_chars = rule_chars.intersec(other_chars)
+			if inter_chars.not_empty():
+			    rule_regex = rule.regex()
+				other_regex = other_rule.regex()
+				produce({inter_chars -> f(rule_regex, other_regex)})
+	    
+		
+

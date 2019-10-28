@@ -432,3 +432,17 @@ impl Normalize for Regex<char> {
 		}
 	}
 }
+
+impl<T> Regex<T> {
+    pub fn nullable(&self) -> bool {
+        match *self {
+            Null(_) => false,
+            Empty(_) => true,
+            Chars(ref cs, _) => cs.len() == 0,
+            Kleene(_, __) => true,
+            Cat(ref rs, _) => rs.iter().all(Regex::nullable),
+            Alt(ref rs, _) => rs.iter().any(Regex::nullable),
+            Not(ref r, _) => !r.nullable()
+        }
+    }
+}
