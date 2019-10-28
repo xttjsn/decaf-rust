@@ -1,16 +1,13 @@
+use std::iter::Peekable;
+use std::cmp::Ordering;
 use crate::regex::*;
 use crate::regex::Regex::*;
 use self::Set::*;
 
-enum Set<T> {
-    Just(Vec<T>),
-    Not(Vec<T>)
-}
-
 const kNID: u64 = 0;
 
 struct Derivative<T, R> {
-    m: Vec<(Set<T>, R)>,
+    m: Vec<(Vec<T>, R)>,
     rest: R
 }
 
@@ -27,11 +24,135 @@ trait Differentiable<T>: Sized {
     fn derivative(&self) -> Derivative<T, Self>;
 }
 
-fn combine<T, R>(v: Vec<Derivative<T, R>>, F: FnMut() -> R) -> Derivative<T, R> {
-    if v.len() == 0 {
-        Derivative {
-            m: Vec::new(),
-            rest: None
+struct Union<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> {
+    a : Peekable<It1>,
+    b : Peekable<It2>,
+}
+fn union<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>>(a: It1, b: It2) -> Union<T, It1, It2> {
+    Union { a: a.peekable(), b: b.peekable() }
+}
+impl<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> Iterator for Union<T, It1, It2> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        match match self.a.peek() {
+            Some(av) => match self.b.peek() {
+                Some(bv) => av.cmp(bv),
+                None => Ordering::Less,
+            },
+            None => Ordering::Greater,
+        } {
+            Ordering::Less => {
+                self.a.next()
+            }
+            Ordering::Greater => {
+                self.b.next()
+            }
+            Ordering::Equal => {
+                self.a.next();
+                self.b.next()
+            }
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (a1, a2) = self.a.size_hint();
+        let (b1, b2) = self.b.size_hint();
+        (a1 + b1,
+         if let (Some(a2), Some(b2)) = (a2, b2) {
+             Some(a2 + b2)
+         } else {
+             None
+         })
+    }
+}
+
+struct Inter<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> {
+    a : Peekable<It1>,
+    b : Peekable<It2>,
+}
+fn inter<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>>(a: It1, b: It2) -> Inter<T, It1, It2> {
+    Inter { a: a.peekable(), b: b.peekable() }
+}
+impl<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> Iterator for Inter<T, It1, It2> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        loop {
+            match if let (Some(av), Some(bv)) = (self.a.peek(), self.b.peek()) {
+                av.cmp(bv)
+            } else {
+                return None
+            } {
+                Ordering::Less => {
+                    self.a.next();
+                }
+                Ordering::Greater => {
+                    self.b.next();
+                }
+                Ordering::Equal => {
+                    self.a.next();
+                    return self.b.next();
+                }
+            }
+        }
+    }
+}
+
+struct Subtract<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> {
+    a : Peekable<It1>,
+    b : Peekable<It2>,
+}
+fn subtract<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>>(a: It1, b: It2) -> Subtract<T, It1, It2> {
+    Subtract { a: a.peekable(), b: b.peekable() }
+}
+impl<T: Ord, It1: Iterator<Item=T>, It2: Iterator<Item=T>> Iterator for Subtract<T, It1, It2> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        loop {
+            match match (self.a.peek(), self.b.peek()) {
+                (Some(av), Some(bv)) => av.cmp(bv),
+                (_, None) => Ordering::Less,
+                (None, _) => return None,
+            } {
+                Ordering::Less => {
+                    return self.a.next();
+                }
+                Ordering::Greater => {
+                    self.b.next();
+                }
+                Ordering::Equal => {
+                    self.a.next();
+                    self.b.next();
+                }
+            }
+        }
+    }
+}
+
+enum Set<T> {
+    Just(Vec<T>),
+    Not(Vec<T>)
+}
+
+impl<T: Ord + Clone> Set<T> {
+    fn inter(&self, b: &[T]) -> Set<T> {
+        use self::Set::*;
+        match *self {
+            Just(ref a) => {
+                Just(inter(a.iter().cloned(), b.iter().cloned()).collect())
+            }
+            Not(ref a) => {
+                Just(subtract(b.iter().cloned(), a.iter().cloned()).collect())
+            }
+        }
+    }
+    fn subtract(&self, b: &[T]) -> Set<T> {
+        use self::Set::*;
+        match *self {
+            Just(ref a) => {
+                Just(subtract(a.iter().cloned(), b.iter().cloned()).collect())
+            }
+            Not(ref a) => {
+                Not(union(a.iter().cloned(), b.iter().cloned()).collect())
+            }
         }
     }
 }
@@ -46,6 +167,7 @@ fn combine<T: Ord + Clone, R, S, F: FnMut(&[&R]) -> S>(v: &[Derivative<T, R>], m
     ) {
         if let Set::Just(ref v) = what {
             if v.len() == 0 {
+                // prune
                 return;
             }
         }
@@ -75,9 +197,7 @@ fn combine<T: Ord + Clone, R, S, F: FnMut(&[&R]) -> S>(v: &[Derivative<T, R>], m
         go(rest, f, inter, current, out);
         current.pop();
     }
-
-
-    let result = (Vec::new(), None);
+    let mut result = (Vec::new(), None);
     let mut regexes = Vec::new();
     go(v, &mut f, Set::Not(Vec::new()), &mut regexes, &mut result);
     Derivative {
@@ -86,7 +206,7 @@ fn combine<T: Ord + Clone, R, S, F: FnMut(&[&R]) -> S>(v: &[Derivative<T, R>], m
     }
 }
 
-impl<T: Clone> Differentiable<T> for Regex<T> {
+impl<T: Ord + Clone> Differentiable<T> for Regex<T> {
     fn derivative(&self) -> Derivative<T, Self> {
         match *self {
             Null(_) => Derivative { m: Vec::new(), rest: Null(kNID) },
@@ -98,7 +218,7 @@ impl<T: Clone> Differentiable<T> for Regex<T> {
                 else if cs.len() == 1 {
                     Derivative { m: Vec::new(), rest: Empty(kNID) }
                 } else {
-                    Derivative { m: vec![(Just(vec![cs[0].clone()]),
+                    Derivative { m: vec![(vec![cs[0].clone()],
                                           Chars(cs[1..].iter().map(|c| c.clone()).collect(), kNID))],
                                  rest: Null(kNID) }
                 }
@@ -110,7 +230,7 @@ impl<T: Clone> Differentiable<T> for Regex<T> {
                 let mut vs = Vec::new();
                 for i in 0..rs.len() {
                     vs.push(rs[i].derivative().map(|x| {
-                        let v = vec![x];
+                        let mut v = vec![x];
                         v.extend(rs[i..].iter().cloned());
                         Cat(v, kNID)
                     }));
@@ -118,15 +238,24 @@ impl<T: Clone> Differentiable<T> for Regex<T> {
                         break;
                     }
                 }
-                combine(vs, |regexes| Alt(regexes.iter().map(|r| (*r).clone()).collect(), kNID))
+                combine(&vs, |regexes| Alt(regexes.iter().map(|r| (*r).clone()).collect(), kNID))
             },
             Alt(ref rs, _) => {
-                let mut vs = rs.iter().map(|r| r.derivative()).collect();
-                combine(vs, |regexes| Alt(regexes.iter().map(|r| (*r).clone()).collect(), kNID))
+				let mut vs = Vec::new();
+				vs.extend(rs.iter().map(Differentiable::derivative));
+                combine(&vs, |regexes| Alt(regexes.iter().map(|r| (*r).clone()).collect(), kNID))
             },
             Regex::Not(ref r, _) => {
-                r.derivative().map(|r| Regex::Not(Box::new(r.clone()), kNID))
+                r.derivative().map(|r| Regex::Not(Box::new(r), kNID))
             }
         }
+    }
+}
+
+// Derivatives of "regular vectors", as described in "Regular-expression derivatives reexamined" by Owens et al.
+impl<T: Ord + Clone, R: Differentiable<T> + Clone> Differentiable<T> for Vec<R> {
+    fn derivative(&self) -> Derivative<T, Vec<R>> {
+        let v: Vec<Derivative<T, R>> = self.iter().map(Differentiable::derivative).collect();
+        combine(&*v, |xs: &[&R]| xs.iter().map(|&x| x.clone()).collect())
     }
 }
