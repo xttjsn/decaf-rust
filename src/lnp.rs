@@ -118,7 +118,7 @@ mod lexer {
                 panic!("integer {} is out of range", text)
             }
         }
-
+   // Check these for Literals  --Raj
 		r#"\' \'"# => Token::CharLit(' '),
 		r#"\'\\n"# => Token::CharLit('\n'),
 		r#"\'\\t\'"# => Token::CharLit('\t'),
@@ -728,6 +728,77 @@ mod parser {
 			=> vec![],
 
 		}
+
+
+               dim:Dimension{
+                   LBracket expr[e] RBracket => Dimension{
+                       span:span!(),
+                       expr: e,
+                   }
+
+               }
+
+                   nnaexpr:NonNewArrayExpr{
+                       liter[lt]=>NonNewArrayExpr {
+                           span: span!(),
+                           expr: NNAExpr::JustLit(lt),
+                       },
+
+                       This => NonNewArrayExpr{
+                           span:span!(),
+                           expr: NNAExpr::JustThis,
+                       },
+
+                       LParen expr[e] RParen => NonNewArrayExpr{
+                           sapn: span!(),
+                           expr:JustExpr(e),
+                       },
+
+                       New Ident(Id) actualargs[a] => NonNewArrayExpr{
+                           span: span!(),
+                           expr: NewObj(Id, a),
+                       },
+
+                       Ident(Id) actualargs[a] =>NonNewArrayExpr{
+                           span: span!(),
+                           expr: CallFunc(Id, a),
+                       },
+
+                       primary[p] Dot Ident(Id) actualargs[a] => NonNewArrayExpr{
+                           span:span!(),
+                           expr: CallMethod(p, Id, a),
+
+                       },
+                       
+                       Super Dot Ident(Id) actualargs[a] => NonNewArrayExpr{
+                           span:span!(),
+                           expr:CallSuper(Id, a) 
+
+                       },
+
+                       arrayexpr[a] =>NonNewArrayExpr{
+                           span:span!(),
+                           expr:EvalArray(a),
+                       },
+
+                       field[f] =>NonNewArrayExpr{
+                           span:span!(),
+                           expr:EvalField(f)
+                       },
+
+                   }
+
+                           exprlist:Vec<Expression> {
+                               expr[e] => vec![e],
+                               exprlist[mut el] expr[e] => {
+                                   el.push(e);
+                                   el
+                               }
+                           }
+
+
+
+
 
 
         statements: Vec<Expr> {
