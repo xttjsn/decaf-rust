@@ -3,8 +3,10 @@ extern crate plex;
 
 use std::io::Read;
 
+
 mod lexer {
     use plex::lexer;
+	use std::str::FromStr;
 
     #[derive(Debug, Clone)]
     pub enum Token {
@@ -118,18 +120,27 @@ mod lexer {
                 panic!("integer {} is out of range", text)
             }
         }
-
+   // Check these for Literals  --Raj
 		r#"\' \'"# => Token::CharLit(' '),
 		r#"\'\\n"# => Token::CharLit('\n'),
 		r#"\'\\t\'"# => Token::CharLit('\t'),
 		r#"\'\\\'"# => Token::CharLit('\\'),
-		r#"\'.\'"# => Token::CharLit(text.char_at(1)),
-		r#"\'\\.\'"# => Token::CharLit(text.char_at(2)),
-		r#"\".*\""# => Token::StrLit({
-			let len = s.len();
-			s[1..len]
+		r#"\'.\'"# => Token::CharLit({
+			let mut it = text.chars();
+			it.next();
+			it.next().unwrap()
 		}),
-		r#"true|false"# => Token::BoolLit(text.parse()),
+		r#"\'\\.\'"# => Token::CharLit( {
+			let mut it = text.chars();
+			it.next();
+			it.next();
+			it.next().unwrap()
+		}),
+		r#"\".*\""# => Token::StrLit({
+			let len = text.len();
+			String::from_str(&text[1..len]).unwrap()
+		}),
+		r#"true|false"# => Token::BoolLit(text.parse().unwrap()),
 		r#"null"# => Token::NullLit,
 
 
@@ -210,7 +221,7 @@ mod lexer {
 }
 
 mod ast {
-    use lexer::Span;
+    use super::lexer::{Span};
 
     #[derive(Debug)]
     pub struct Program {
@@ -331,7 +342,7 @@ mod ast {
 	}
 
 	#[derive(Debug)]
-	pub enum VarDeclaratorInner {
+	pub enum VarDeclaratorIdInner {
 		Single(String),
 		Array(Box<VarDeclaratorId>)
 	}
@@ -351,7 +362,7 @@ mod ast {
 	#[derive(Debug)]
 	pub enum Stmt {
 		EmptyStmt,
-		DeclareStmt(Type, VarDeclaratorList),
+		DeclareStmt(Type, Vec<VarDeclarator>),
 		IfStmt(Expression, Box<Statement>),
 		IfElseStmt(Expression, Box<Statement>, Box<Statement>),
 		ExprStmt(Expression),
@@ -359,7 +370,7 @@ mod ast {
 		ReturnStmt(Option<Expression>),
 		ContinueStmt,
 		BreakStmt,
-		SuperStmt(ActuralArgs),
+		SuperStmt(ActualArgs),
 		BlockStmt(Block)
 	}
 
@@ -371,8 +382,8 @@ mod ast {
 
 	#[derive(Debug)]
 	pub enum Expr {
-		BinaryExpr(Box<Expression>, BinaryOp, Box<Expression>),
-		UnaryExpr(UnaryOp, Box<Expression>),
+		BinaryExpr(Box<Expression>, BinaryOp, Primary),
+		UnaryExpr(UnaryOp, Primary),
 		PrimaryExpr(Primary)
 	}
 
@@ -496,10 +507,10 @@ mod ast {
 	#[derive(Debug)]
 	pub enum Litr {
 		Null,
-		Bool(BoolLit),
-		Int(IntLit),
-		Char(CharLit),
-		Str(StrLit),
+		Bool(bool),
+		Int(i64),
+		Char(char),
+		Str(String),
 	}
 
 	#[derive(Debug)]
@@ -510,12 +521,15 @@ mod ast {
 }
 
 mod parser {
-    use ast::*;
-    use lexer::Token::*;
-    use lexer::*;
+    use super::ast::*;
+    use super::lexer::Token::*;
+    use super::lexer::*;
     use plex::parser;
     parser! {
         fn parse_(Token, Span);
+
+		%nonassoc "then"
+	    %nonassoc "else"
 
         // combine two spans
         (a, b) {
@@ -639,7 +653,7 @@ mod parser {
 
 		formalarglist: Vec<FormalArg> {
 			formalarg[arg] => vec![arg],
-			formalarg[arg] Comma formalarglist[args] {
+			formalarg[arg] Comma formalarglist[args] => {
 				// To maintain order
 				let new_args = Vec::new();
 				new_args.push(arg);
@@ -696,7 +710,7 @@ mod parser {
 			vardeclid[id] Assign expr[e] => VarDeclarator {
 				span: span!(),
 				vardeclid: id,
-				expr: e,
+				expr: Some(e),
 			}
 		}
 
@@ -731,7 +745,7 @@ mod parser {
 				span: span!(),
 				stmt: Stmt::DeclareStmt(t, vdecll),
 			},
-			If LParen expr[e] RParen stmt[s] => Statement {
+			If LParen expr[e] RParen stmt[s] ==%prec "then"== => Statement {
 				span: span!(),
 				stmt: Stmt::IfStmt(e, Box::new(s)),
 			},
@@ -778,13 +792,13 @@ mod parser {
 		}
 
 		expr: Expression {
-			expr[le] binop[op] expr[re] => Expression {
+			expr[le] binop[op] primary[p] => Expression {
 				span: span!(),
-				expr: Expr::BinaryExpr(Box::new(le), op, Box::new(re)),
+				expr: Expr::BinaryExpr(Box::new(le), op, p),
 			},
-			unop[op] expr[e] => Expression {
+			unop[op] primary[p] => Expression {
 				span: span!(),
-				expr: Expr::UnaryExpr(op, Box::new(e)),
+				expr: Expr::UnaryExpr(op, p),
 			},
 			primary[p] => Expression {
 				span: span!(),
@@ -855,6 +869,7 @@ mod parser {
 			},
 		}
 
+
 		unop: UnaryOp {
 			Plus => UnaryOP {
 				span: span!(),
@@ -904,7 +919,73 @@ mod parser {
 			}
 		}
 
-		fieldexpr: FieldExr {
+        dim: Dimension{
+            LBracket expr[e] RBracket => Dimension{
+                span:span!(),
+                expr: e,
+            }
+
+        }
+
+        nnaexpr: NonNewArrayExpr{
+            liter[lt] => NonNewArrayExpr {
+                span: span!(),
+                expr: NNAExpr::JustLit(lt),
+            },
+
+            This => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::JustThis,
+            },
+
+            LParen expr[e] RParen => NonNewArrayExpr{
+                sapn: span!(),
+                expr: NNAExpr::JustExpr(e),
+            },
+
+            New Ident(id) actualargs[a] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::NewObj(id, a),
+            },
+
+            Ident(id) actualargs[a] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::CallFunc(id, a),
+            },
+
+            primary[p] Dot Ident(id) actualargs[a] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::CallMethod(p, id, a),
+
+            },
+
+            Super Dot Ident(id) actualargs[a] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::CallSuper(id, a)
+
+            },
+
+            arrayexpr[a] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::EvalArray(a),
+            },
+
+            fieldexpr[f] => NonNewArrayExpr{
+                span: span!(),
+                expr: NNAExpr::EvalField(f)
+            },
+
+        }
+
+        exprlist: Vec<Expression> {
+            expr[e] => vec![e],
+            exprlist[mut el] expr[e] => {
+                el.push(e);
+                el
+            }
+        }
+
+		fieldexpr: FieldExpr {
 			primary[p] Dot Ident(id) => FieldExpr {
 				span: span!(),
 				expr: FExpr::PrimaryFieldExpr(p, id),
@@ -969,38 +1050,38 @@ mod parser {
     }
 }
 
-mod interp {
-    use ast::*;
-    use std::collections::HashMap;
+// mod interp {
+//     use super::ast::*;
+//     use std::collections::HashMap;
 
-    pub fn interp<'a>(p: &'a Program) {
-        let mut env = HashMap::new();
-        for expr in &p.stmts {
-            interp_expr(&mut env, expr);
-        }
-    }
-    fn interp_expr<'a>(env: &mut HashMap<&'a str, i64>, expr: &'a Expr) -> i64 {
-        use ast::Expr_::*;
-        match expr.node {
-            Add(ref a, ref b) => interp_expr(env, a) + interp_expr(env, b),
-            Sub(ref a, ref b) => interp_expr(env, a) - interp_expr(env, b),
-            Mul(ref a, ref b) => interp_expr(env, a) * interp_expr(env, b),
-            Div(ref a, ref b) => interp_expr(env, a) / interp_expr(env, b),
-            Assign(ref var, ref b) => {
-                let val = interp_expr(env, b);
-                env.insert(var, val);
-                val
-            }
-            Var(ref var) => *env.get(&var[..]).unwrap(),
-            Literal(lit) => lit,
-            Print(ref e) => {
-                let val = interp_expr(env, e);
-                println!("{}", val);
-                val
-            }
-        }
-    }
-}
+//     pub fn interp<'a>(p: &'a Program) {
+//         let mut env = HashMap::new();
+//         for expr in &p.stmts {
+//             interp_expr(&mut env, expr);
+//         }
+//     }
+//     fn interp_expr<'a>(env: &mut HashMap<&'a str, i64>, expr: &'a Expr) -> i64 {
+//         use ast::Expr_::*;
+//         match expr.node {
+//             Add(ref a, ref b) => interp_expr(env, a) + interp_expr(env, b),
+//             Sub(ref a, ref b) => interp_expr(env, a) - interp_expr(env, b),
+//             Mul(ref a, ref b) => interp_expr(env, a) * interp_expr(env, b),
+//             Div(ref a, ref b) => interp_expr(env, a) / interp_expr(env, b),
+//             Assign(ref var, ref b) => {
+//                 let val = interp_expr(env, b);
+//                 env.insert(var, val);
+//                 val
+//             }
+//             Var(ref var) => *env.get(&var[..]).unwrap(),
+//             Literal(lit) => lit,
+//             Print(ref e) => {
+//                 let val = interp_expr(env, e);
+//                 println!("{}", val);
+//                 val
+//             }
+//         }
+//     }
+// }
 
 fn main() {
     let mut s = String::new();
