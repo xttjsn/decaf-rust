@@ -325,7 +325,7 @@ mod ast {
 	}
 
 	#[derive(Debug)]
-	pub enum VarDeclaratorId {
+	pub struct VarDeclaratorId {
 		pub span: Span,
 		pub id: VarDeclaratorIdInner,
 	}
@@ -422,11 +422,11 @@ mod ast {
 	#[derive(Debug)]
 	pub enum Prim {
 		NewArray(NewArrayExpr),
-		NonNewArray(NonNewArrayExpr),
+		NonNewArray(Box<NonNewArrayExpr>),
 		Identifier(String),
 	}
 
-	#[deive(Debug)]
+	#[derive(Debug)]
 	pub struct NewArrayExpr {
 		pub span: Span,
 		pub expr: NAExpr,
@@ -458,7 +458,7 @@ mod ast {
 		NewObj(String, ActualArgs),
 		CallFunc(String, ActualArgs),
 		CallMethod(Primary, String, ActualArgs),
-		CallSuper(String, ActuralArgs),
+		CallSuper(String, ActualArgs),
 		EvalArray(ArrayExpr),
 		EvalField(FieldExpr)
 	}
@@ -496,7 +496,7 @@ mod ast {
 	#[derive(Debug)]
 	pub enum Litr {
 		Null,
-		Bool(BoolLit)
+		Bool(BoolLit),
 		Int(IntLit),
 		Char(CharLit),
 		Str(StrLit),
@@ -504,12 +504,6 @@ mod ast {
 
 	#[derive(Debug)]
 	pub struct ActualArgs {
-		pub span: Span,
-		pub expr_lists: Option<ExprList>,
-	}
-
-	#[derive(Debug)]
-	pub struct ExprList {
 		pub span: Span,
 		pub exprs: Vec<Expression>,
 	}
@@ -726,66 +720,246 @@ mod parser {
 
 		stmts: Vec<Statement> {
 			=> vec![],
-
+			stmts[mut st] stmt[s] => {
+				st.push(s);
+				st
+			}
 		}
 
+		stmt: Statement {
+			ty[t] vardecllist[vdecll] Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::DeclareStmt(t, vdecll),
+			},
+			If LParen expr[e] RParen stmt[s] => Statement {
+				span: span!(),
+				stmt: Stmt::IfStmt(e, Box::new(s)),
+			},
+			If LParen expr[e] RParen stmt[s0] Else stmt[s1] => Statement {
+				span: span!(),
+				stmt: Stmt::IfElseStmt(e, Box::new(s0), Box::new(s1)),
+			},
+			expr[e] Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::ExprStmt(e),
+			},
+			While LParen expr[e] RParen stmt[s] => Statement {
+				span: span!(),
+				stmt: Stmt::WhileStmt(e, Box::new(s)),
+			},
+			Return Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::ReturnStmt(None),
+			},
+			Return expr[e] Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::ReturnStmt(Some(e)),
+			},
+			Continue Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::ContinueStmt,
+			},
+			Break Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::BreakStmt,
+			},
+			Super acturalargs[args] Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::SuperStmt(args),
+			},
+			block[b] => Statement {
+				span: span!(),
+				stmt: Stmt::BlockStmt(b),
+			},
+			Semicolon => Statement {
+				span: span!(),
+				stmt: Stmt::EmptyStmt,
+			}
+		}
 
-        statements: Vec<Expr> {
-            => vec![],
-            statements[mut st] assign[e] Semi => {
-                st.push(e);
-                st
-            }
-        }
+		expr: Expression {
+			expr[le] binop[op] expr[re] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(le), op, Box::new(re)),
+			},
+			unop[op] expr[e] => Expression {
+				span: span!(),
+				expr: Expr::UnaryExpr(op, Box::new(e)),
+			},
+			primary[p] => Expression {
+				span: span!(),
+				expr: Expr::PrimaryExpr(p),
+			}
+		}
 
-        assign: Expr {
-            Print assign[a] => Expr {
-                span: span!(),
-                node: Expr_::Print(Box::new(a)),
-            },
-            Ident(var) Equals assign[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Assign(var, Box::new(rhs)),
-            },
-            term[t] => t,
-        }
+		binop: BinaryOp {
+			Assign => BinaryOp {
+				span: span!(),
+				op: BinOp::AssignOp,
+			},
+			LogicalOr => BinaryOp {
+				span: span!(),
+				op: BinOp::LogicalOrOp,
+			},
+			LogicalAnd => BinaryOp {
+				span: span!(),
+				op: BinOp::LogicalAnd,
+			},
+			Equals => BinaryOp {
+				span: span!(),
+				op: BinOp::EqualsOp,
+			},
+			NotEqual => BinaryOp {
+				span: span!(),
+				op: BinOp::NotEqualOp,
+			},
+			LessThan => BinaryOp {
+				span: span!(),
+				op: BinOp::LessThanOp,
+			},
+			GreaterThan => BinaryOp {
+				span: span!(),
+				op: BinOp::GreaterThanOp,
+			},
+			LessOrEqual => BinaryOp {
+				span: span!(),
+				op: BinOp::LessOrEqualOp,
+			},
+			GreaterOrEqual => BinaryOp {
+				span: span!(),
+				op: BinOp::GreaterOrEqualOp,
+			},
+			Plus => BinaryOp {
+				span: span!(),
+				op: BinOp::PlusOp,
+			},
+			Minus => BinaryOp {
+				span: span!(),
+				op: BinOp::MinusOp,
+			},
+			Plus => BinaryOp {
+				span: span!(),
+				op: BinOp::PlusOp,
+			},
+			Times => BinaryOp {
+				span: span!(),
+				op: BinOp::TimesOp,
+			},
+			Divide => BinaryOp {
+				span: span!(),
+				op: BinOp::DivideOp,
+			},
+			Mod => BinaryOp {
+				span: span!(),
+				op: BinOp::ModOp,
+			},
+		}
 
-        term: Expr {
-            term[lhs] Plus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Add(Box::new(lhs), Box::new(rhs)),
-            },
-            term[lhs] Minus fact[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Sub(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[x] => x
-        }
+		unop: UnaryOp {
+			Plus => UnaryOP {
+				span: span!(),
+				op: UnOp::PlusUOp,
+			},
+			Minus => UnaryOP {
+				span: span!(),
+				op: UnOp::MinusUOp,
+			},
+			Not => UnaryOp {
+				span: span!(),
+				op: UnOp::NotUOp,
+			}
+		}
 
-        fact: Expr {
-            fact[lhs] Star atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Mul(Box::new(lhs), Box::new(rhs)),
-            },
-            fact[lhs] Slash atom[rhs] => Expr {
-                span: span!(),
-                node: Expr_::Div(Box::new(lhs), Box::new(rhs)),
-            },
-            atom[x] => x
-        }
+		primary: Primary {
+			newarrayexpr[e] => Primary {
+				span: span!(),
+				prim: Prim::NewArray(e),
+			},
+			nonnewarrayexpr[ne] => Primary {
+				span: span!(),
+				prim: Prim::NonNewArray(Box::new(ne)),
+			},
+			Ident[id] => Primary {
+				span: span!(),
+				prim: Prim::Identifier(id),
+			},
+		}
 
-        atom: Expr {
-            // round brackets to destructure tokens
-            Ident(i) => Expr {
-                span: span!(),
-                node: Expr_::Var(i),
-            },
-            Integer(i) => Expr {
-                span: span!(),
-                node: Expr_::Literal(i),
-            },
-            LParen assign[a] RParen => a
-        }
+		newarrayexpr: NewArrayExpr {
+			New Ident(id) dims[ds] => NewArrayExpr {
+				span: span!(),
+				expr: NAExpr::NewCustom(id, ds),
+			},
+			New primty[pty] dims[ds] => NewArrayExpr {
+				span: span!(),
+				expr: NAExpr::NewPrimitive(pty, ds),
+			}
+		}
+
+		dims: Vec<Dimension> {
+			dim[d] => vec![d],
+			dims[mut ds] dim[d] => {
+				ds.push(d);
+				ds
+			}
+		}
+
+		fieldexpr: FieldExr {
+			primary[p] Dot Ident(id) => FieldExpr {
+				span: span!(),
+				expr: FExpr::PrimaryFieldExpr(p, id),
+			},
+			Super Dot Ident(id) => FieldExpr {
+				span: span!(),
+				expr: FExpr::SuperFieldExpr(id),
+			},
+		}
+
+		arrayexpr: ArrayExpr {
+			Ident(id) dim[d] => ArrayExpr {
+				span: span!(),
+				expr: AExpr::SimpleArraryExpr(id, d),
+			},
+			nnaexpr[e] dim[d] => ArrayExpr {
+				span: span!(),
+				expr: AExpr::ComplexArrayExpr(e, d),
+			},
+		}
+
+		liter: Literal {
+			Null => Literal {
+				span: span!(),
+				litr: Litr::Null,
+			},
+			BoolLit(b) => Literal {
+				span: span!(),
+				litr: Litr::Bool(b),
+			},
+			IntLit(i) => Literal {
+				span: span!(),
+				litr: Litr::Int(i),
+			},
+			CharLit(c) => Literal {
+				span: span!(),
+				litr: Litr::Char(c),
+			},
+			StrLit(s) => Literal {
+				span: span!(),
+				litr: Litr::Str(s),
+			}
+		}
+
+		actualargs: ActualArgs {
+			LParen RParen => ActualArgs {
+				span: span!(),
+				exprs: vec![],
+			},
+			LParen exprlist[el] RParen => ActualArgs {
+				span: span!(),
+				exprs: el,
+			}
+		}
+
     }
 
     pub fn parse<I: Iterator<Item = (Token, Span)>>(
