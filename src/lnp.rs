@@ -47,6 +47,7 @@ pub mod lexer {
 		RParen,
 		LBrace,
 		RBrace,
+        BracketPair,
 		LBracket,
 		RBracket,
 		Semicolon,
@@ -83,7 +84,7 @@ pub mod lexer {
         r#"//[^\n]*"# => Token::Comment,
 
         r#"break"# => Token::Break,
-		r#"Class"# => Token::Class,
+		r#"class"# => Token::Class,
 		r#"continue"# => Token::Continue,
 		r#"else"# => Token::Else,
 		r#"extends"# => Token::Extends,
@@ -133,7 +134,7 @@ pub mod lexer {
 			it.next();
 			it.next().unwrap()
 		}),
-		r#"\".*\""# => Token::StrLit({
+		r#"\"[^\n]*\""# => Token::StrLit({
 			let len = text.len();
 			String::from_str(&text[1..len]).unwrap()
 		}),
@@ -145,6 +146,7 @@ pub mod lexer {
 		r#"\)"# => Token::RParen,
 		r#"\{"# => Token::LBrace,
 		r#"\}"# => Token::RBrace,
+        r#"\[\]"# => Token::BracketPair,
 		r#"\["# => Token::LBracket,
 		r#"\]"# => Token::RBracket,
 		r#";"# => Token::Semicolon,
@@ -379,8 +381,8 @@ mod ast {
 
 	#[derive(Debug)]
 	pub enum Expr {
-		BinaryExpr(Box<Expression>, BinaryOp, Primary),
-		UnaryExpr(UnaryOp, Primary),
+		BinaryExpr(Box<Expression>, BinaryOp, Box<Expression>),
+		UnaryExpr(UnaryOp, Box<Expression>),
 		PrimaryExpr(Primary)
 	}
 
@@ -582,7 +584,7 @@ pub mod parser {
 		}
 
 		field: Field {
-			modifiers[ms] ty[t] vardecllist[vars] => Field {
+			modifiers[ms] ty[t] vardecllist[vars] Semicolon => Field {
 				span: span!(),
 				modies: ms,
 				ty: t,
@@ -668,7 +670,7 @@ pub mod parser {
 			primty[pty] => Type::Primitive(pty),
 			#[no_reduce(Dot, LBracket, LBrace, LParen)]
 			Ident(id) => Type::Custom(id),
-			ty[t] LBracket RBracket => Type::Array(Box::new(t))
+			ty[t] BracketPair => Type::Array(Box::new(t))
 		}
 
 		primty: PrimitiveType {
@@ -714,7 +716,7 @@ pub mod parser {
 				span: span!(),
 				id: VarDeclaratorIdInner::Single(id),
 			},
-			vardeclid[id] LBracket RBracket => VarDeclaratorId {
+			vardeclid[id] BracketPair => VarDeclaratorId {
 				span: span!(),
 				id: VarDeclaratorIdInner::Array(Box::new(id)),
 			}
@@ -788,18 +790,27 @@ pub mod parser {
 		}
 
 		expr: Expression {
-			expr[le] binop[op] primary[p] => Expression {
+            #[no_reduce(Assign, Plus, Minus, Times, Divide, Mod, LessThan, GreaterThan, Not, Equals, GreaterOrEqual, LessOrEqual, NotEqual, LogicalAnd, LogicalOr)]
+			expr[le] binop[op] expr[re] => Expression {
 				span: span!(),
-				expr: Expr::BinaryExpr(Box::new(le), op, p),
+				expr: Expr::BinaryExpr(Box::new(le), op, Box::new(re)),
 			},
-			unop[op] primary[p] => Expression {
+            #[no_reduce(Assign, Plus, Minus, Times, Divide, Mod, LessThan, GreaterThan, Not, Equals, GreaterOrEqual, LessOrEqual, NotEqual, LogicalAnd, LogicalOr)]
+			unop[op] expr[e] => Expression {
 				span: span!(),
-				expr: Expr::UnaryExpr(op, p),
+				expr: Expr::UnaryExpr(op, Box::new(e)),
 			},
 			primary[p] => Expression {
 				span: span!(),
 				expr: Expr::PrimaryExpr(p),
-			}
+			},
+            Ident(id) => Expression {
+                span: span!(),
+                expr: Expr::PrimaryExpr(Primary {
+                    span: span!(),
+                    prim: Prim::Identifier(id),
+                })
+            }
 		}
 
 		binop: BinaryOp {

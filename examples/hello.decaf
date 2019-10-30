@@ -1,0 +1,19 @@
+class Animal {
+  public String name() {
+    return "anonymous";
+  }
+}
+
+
+class Hello {
+  Hello x;
+  public String main(String[] argv)
+  {
+    IO.putString ("s");
+	int x = IO.getInt();
+    int y = IO.getInt ();
+	if(dx < 0){ int dx = -dx; };
+	IO.putInt (x);
+	IO.putInt (y);
+  }
+}
