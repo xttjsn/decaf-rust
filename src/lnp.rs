@@ -402,8 +402,8 @@ mod ast {
 		NotEqualsOp,
 		LessThanOp,
 		GreaterThanOp,
-		LessThanEqOp,
-		GreaterThanEqOp,
+		LessOrEqOp,
+		GreaterOrEqOp,
 		PlusOp,
 		MinusOp,
 		TimesOp,
@@ -528,9 +528,6 @@ mod parser {
     parser! {
         fn parse_(Token, Span);
 
-		%nonassoc "then"
-	    %nonassoc "else"
-
         // combine two spans
         (a, b) {
             Span {
@@ -552,17 +549,17 @@ mod parser {
 		}
 
 		class: ClassNode {
-			Class Ident(id) sueprnode LBrace members RBrace => ClassNode {
+			Class Ident(id) supernode[s] LBrace members[ms] RBrace => ClassNode {
 				span: span!(),
 				name: id,
-				sup: Some(supernode),
-				member_list: members,
+				sup: Some(s),
+				member_list: ms,
 			},
-			Class Ident(id) LBrace members RBrace => ClassNode {
+			Class Ident(id) LBrace members[ms] RBrace => ClassNode {
 				span: span!(),
 				name: id,
 				sup: None,
-				member_list: members,
+				member_list: ms,
 			}
 		}
 
@@ -626,16 +623,16 @@ mod parser {
 		}
 
 		modifier: Modifier {
-			Static => ModStatic(ModNode {
+			Static => Modifier::ModStatic(ModNode {
 				span: span!()
 			}),
-			Public => ModPublic(ModNode {
+			Public => Modifier::ModPublic(ModNode {
 				span: span!()
 			}),
-			Private => ModPrivate(ModNode {
+			Private => Modifier::ModPrivate(ModNode {
 				span: span!()
 			}),
-			Protected => ModProtected(ModNode {
+			Protected => Modifier::ModProtected(ModNode {
 				span: span!()
 			})
 		}
@@ -643,11 +640,11 @@ mod parser {
 		formalargs: FormalArgs {
 			LParen RParen => FormalArgs {
 				span: span!(),
-				frag_list: None,
+				farg_list: vec![],
 			},
-			LParen formalarglist(arglist) RParen => FormalArgs {
+			LParen formalarglist[args] RParen => FormalArgs {
 				span: span!(),
-				frag_list: Some(arglist)
+				farg_list: args
 			},
 		}
 
@@ -655,7 +652,7 @@ mod parser {
 			formalarg[arg] => vec![arg],
 			formalarg[arg] Comma formalarglist[args] => {
 				// To maintain order
-				let new_args = Vec::new();
+				let mut new_args = Vec::new();
 				new_args.push(arg);
 				new_args.extend(args);
 				new_args
@@ -672,7 +669,8 @@ mod parser {
 
 		ty: Type {
 			primty[pty] => Type::Primitive(pty),
-			Indent[id] => Type::Custom(id),
+			#[no_reduce(Dot, LBracket, LBrace, LParen)]
+			Ident(id) => Type::Custom(id),
 			ty[t] LBracket RBracket => Type::Array(Box::new(t))
 		}
 
@@ -694,7 +692,7 @@ mod parser {
 		vardecllist: Vec<VarDeclarator> {
 			vardecl[vdecl] => vec![vdecl],
 			vardecl[vdecl] Comma vardecllist[vdecls] => {
-				let new_vdecls = Vec::new();
+				let mut new_vdecls = Vec::new();
 				new_vdecls.push(vdecl);
 				new_vdecls.extend(vdecls);
 				new_vdecls
@@ -717,11 +715,11 @@ mod parser {
 		vardeclid: VarDeclaratorId {
 			Ident(id) => VarDeclaratorId {
 				span: span!(),
-				id: VarDeclaratorInner::Single(id),
+				id: VarDeclaratorIdInner::Single(id),
 			},
 			vardeclid[id] LBracket RBracket => VarDeclaratorId {
 				span: span!(),
-				id: VarDeclaratorInner::Array(Box::new(id)),
+				id: VarDeclaratorIdInner::Array(Box::new(id)),
 			}
 		}
 
@@ -745,7 +743,8 @@ mod parser {
 				span: span!(),
 				stmt: Stmt::DeclareStmt(t, vdecll),
 			},
-			If LParen expr[e] RParen stmt[s] ==%prec "then"== => Statement {
+			#[no_reduce(Else)]
+			If LParen expr[e] RParen stmt[s] => Statement {
 				span: span!(),
 				stmt: Stmt::IfStmt(e, Box::new(s)),
 			},
@@ -777,7 +776,7 @@ mod parser {
 				span: span!(),
 				stmt: Stmt::BreakStmt,
 			},
-			Super acturalargs[args] Semicolon => Statement {
+			Super actualargs[args] Semicolon => Statement {
 				span: span!(),
 				stmt: Stmt::SuperStmt(args),
 			},
@@ -817,7 +816,7 @@ mod parser {
 			},
 			LogicalAnd => BinaryOp {
 				span: span!(),
-				op: BinOp::LogicalAnd,
+				op: BinOp::LogicalAndOp,
 			},
 			Equals => BinaryOp {
 				span: span!(),
@@ -825,7 +824,7 @@ mod parser {
 			},
 			NotEqual => BinaryOp {
 				span: span!(),
-				op: BinOp::NotEqualOp,
+				op: BinOp::NotEqualsOp,
 			},
 			LessThan => BinaryOp {
 				span: span!(),
@@ -837,11 +836,11 @@ mod parser {
 			},
 			LessOrEqual => BinaryOp {
 				span: span!(),
-				op: BinOp::LessOrEqualOp,
+				op: BinOp::LessOrEqOp,
 			},
 			GreaterOrEqual => BinaryOp {
 				span: span!(),
-				op: BinOp::GreaterOrEqualOp,
+				op: BinOp::GreaterOrEqOp,
 			},
 			Plus => BinaryOp {
 				span: span!(),
@@ -871,11 +870,11 @@ mod parser {
 
 
 		unop: UnaryOp {
-			Plus => UnaryOP {
+			Plus => UnaryOp {
 				span: span!(),
 				op: UnOp::PlusUOp,
 			},
-			Minus => UnaryOP {
+			Minus => UnaryOp {
 				span: span!(),
 				op: UnOp::MinusUOp,
 			},
@@ -890,14 +889,15 @@ mod parser {
 				span: span!(),
 				prim: Prim::NewArray(e),
 			},
-			nonnewarrayexpr[ne] => Primary {
+			nnaexpr[ne] => Primary {
 				span: span!(),
 				prim: Prim::NonNewArray(Box::new(ne)),
 			},
-			Ident[id] => Primary {
-				span: span!(),
-				prim: Prim::Identifier(id),
-			},
+			// #[no_reduce(LParen)]
+			// Ident(id) => Primary {
+			// 	span: span!(),
+			// 	prim: Prim::Identifier(id),
+			// },
 		}
 
 		newarrayexpr: NewArrayExpr {
@@ -939,7 +939,7 @@ mod parser {
             },
 
             LParen expr[e] RParen => NonNewArrayExpr{
-                sapn: span!(),
+                span: span!(),
                 expr: NNAExpr::JustExpr(e),
             },
 
@@ -956,13 +956,19 @@ mod parser {
             primary[p] Dot Ident(id) actualargs[a] => NonNewArrayExpr{
                 span: span!(),
                 expr: NNAExpr::CallMethod(p, id, a),
-
             },
+
+			Ident(id0) Dot Ident(id1) actualargs[a] => NonNewArrayExpr {
+				span: span!(),
+				expr: NNAExpr::CallMethod(Primary {
+					span: span!(),
+					prim: Prim::Identifier(id0)
+				}, id1, a),
+			},
 
             Super Dot Ident(id) actualargs[a] => NonNewArrayExpr{
                 span: span!(),
-                expr: NNAExpr::CallSuper(id, a)
-
+                expr: NNAExpr::CallSuper(id, a),
             },
 
             arrayexpr[a] => NonNewArrayExpr{
@@ -979,17 +985,26 @@ mod parser {
 
         exprlist: Vec<Expression> {
             expr[e] => vec![e],
-            exprlist[mut el] expr[e] => {
+            exprlist[mut el] Comma expr[e] => {
                 el.push(e);
                 el
             }
         }
 
 		fieldexpr: FieldExpr {
+			#[no_reduce(LParen)]
 			primary[p] Dot Ident(id) => FieldExpr {
 				span: span!(),
 				expr: FExpr::PrimaryFieldExpr(p, id),
 			},
+			Ident(id0) Dot Ident(id1) => FieldExpr {
+				span: span!(),
+				expr: FExpr::PrimaryFieldExpr(Primary {
+					span: span!(),
+					prim: Prim::Identifier(id0),
+				}, id1),
+			},
+			#[no_reduce(LParen)]   // fix nnaexpr and fieldexpr shift-reduce conflict
 			Super Dot Ident(id) => FieldExpr {
 				span: span!(),
 				expr: FExpr::SuperFieldExpr(id),
@@ -1003,12 +1018,12 @@ mod parser {
 			},
 			nnaexpr[e] dim[d] => ArrayExpr {
 				span: span!(),
-				expr: AExpr::ComplexArrayExpr(e, d),
+				expr: AExpr::ComplexArrayExpr(Box::new(e), d),
 			},
 		}
 
 		liter: Literal {
-			Null => Literal {
+			NullLit => Literal {
 				span: span!(),
 				litr: Litr::Null,
 			},
@@ -1050,43 +1065,9 @@ mod parser {
     }
 }
 
-// mod interp {
-//     use super::ast::*;
-//     use std::collections::HashMap;
-
-//     pub fn interp<'a>(p: &'a Program) {
-//         let mut env = HashMap::new();
-//         for expr in &p.stmts {
-//             interp_expr(&mut env, expr);
-//         }
-//     }
-//     fn interp_expr<'a>(env: &mut HashMap<&'a str, i64>, expr: &'a Expr) -> i64 {
-//         use ast::Expr_::*;
-//         match expr.node {
-//             Add(ref a, ref b) => interp_expr(env, a) + interp_expr(env, b),
-//             Sub(ref a, ref b) => interp_expr(env, a) - interp_expr(env, b),
-//             Mul(ref a, ref b) => interp_expr(env, a) * interp_expr(env, b),
-//             Div(ref a, ref b) => interp_expr(env, a) / interp_expr(env, b),
-//             Assign(ref var, ref b) => {
-//                 let val = interp_expr(env, b);
-//                 env.insert(var, val);
-//                 val
-//             }
-//             Var(ref var) => *env.get(&var[..]).unwrap(),
-//             Literal(lit) => lit,
-//             Print(ref e) => {
-//                 let val = interp_expr(env, e);
-//                 println!("{}", val);
-//                 val
-//             }
-//         }
-//     }
-// }
-
 fn main() {
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s).unwrap();
     let lexer = lexer::Lexer::new(&s).inspect(|tok| eprintln!("tok: {:?}", tok));
     let program = parser::parse(lexer).unwrap();
-    interp::interp(&program);
 }
