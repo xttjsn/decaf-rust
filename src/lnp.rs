@@ -1,10 +1,7 @@
 #![feature(proc_macro_hygiene)]
 extern crate plex;
 
-use std::io::Read;
-
-
-mod lexer {
+pub mod lexer {
     use plex::lexer;
 	use std::str::FromStr;
 
@@ -520,7 +517,7 @@ mod ast {
 	}
 }
 
-mod parser {
+pub mod parser {
     use super::ast::*;
     use super::lexer::Token::*;
     use super::lexer::*;
@@ -1065,9 +1062,3 @@ mod parser {
     }
 }
 
-fn main() {
-    let mut s = String::new();
-    std::io::stdin().read_to_string(&mut s).unwrap();
-    let lexer = lexer::Lexer::new(&s).inspect(|tok| eprintln!("tok: {:?}", tok));
-    let program = parser::parse(lexer).unwrap();
-}
