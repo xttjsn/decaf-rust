@@ -122,7 +122,7 @@ impl GenCode for IfStmt {
 				let elsebb = LLVMAppendBasicBlockInContext(llvm.ctx, func, b"else\0".as_ptr() as *const _);
 
 				// Create the basic block for next
-				let nextbb = LLVM
+				let nextbb = LLVMAppendBasicBlockInContext(llvm.ctx, func, b"ifnext\0".as_ptr() as *const _);
 
 				// Generate conditional branch
 				LLVMBuildCondBr(llvm.builder, cond, ifbb, elsebb);
@@ -133,17 +133,48 @@ impl GenCode for IfStmt {
 				// Generate code for if block
 				let if_val = self.if_block.gencode(llvm)?;
 
+				// Branch from the end of if block to next block
+				if !self.if_block.has_return() {
+					LLVMBuildBr(llvm.builder, nextbb);
+				}
+
 				// Move builder position to else block
 				LLVMPositionBuilderAtEnd(llvm.builder, elsebb);
 
 				// Generate code for else block
 				let else_val = else_block.gencode(llvm)?;
 
-				// Return a dummy value
-				Ok(LLVMConstant(LLVMInt32Type(), 0, false));
-			} else {
+				// Branch from the end of else block to next block
+				if !self.else_block.has_return() {
+					LLVMBuildBr(llvm.builder, nextbb);
+				}
 
+			} else {
+				// Create a basic block for next
+				let nextbb = LLVMAppendBasicBlockInContext(llvm.ctx, func, b"ifnext\0".as_ptr() as *const _);
+
+				// Generate conditional branch
+				LLVMBuildCondBr(llvm.builder, cond, ifbb, nextbb);
+
+				// Move builder position to if block
+				LLVMPositionBuilderAtEnd(llvm.builder, ifbb);
+
+				// Generate code for if block
+				let if_val = self.if_block.gencode(llvm)?;
+
+				// Branch from the end of if block to next block
+				if !self.if_block.has_return() {
+					LLVMBuildBr(llvm.builder, nextbb);
+				}
 			}
+			// Return a dummy value
+			Ok(LLVMConstant(LLVMInt32Type(), 0, false));
 		}
+	}
+}
+
+impl GenCode for WhileStmt {
+	fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<LLVMValueRef> {
+
 	}
 }
