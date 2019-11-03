@@ -146,7 +146,7 @@ pub mod lexer {
 		r#"\)"# => Token::RParen,
 		r#"\{"# => Token::LBrace,
 		r#"\}"# => Token::RBrace,
-        r#"\[\]"# => Token::BracketPair,
+        r#"\[[ \t]*\]"# => Token::BracketPair,
 		r#"\["# => Token::LBracket,
 		r#"\]"# => Token::RBracket,
 		r#";"# => Token::Semicolon,
@@ -219,8 +219,12 @@ pub mod lexer {
     }
 }
 
-mod ast {
+pub mod past {
     use super::lexer::{Span};
+
+	pub trait AstWalk<V: Visitor> {
+		fn accept(v: &mut V) -> Re
+	}
 
     #[derive(Debug)]
     pub struct Program {
