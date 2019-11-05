@@ -1,3 +1,9 @@
+pub struct DecafASTBuilder {
+
+}
+
+
+
 impl Visitor {
 
 	pub fn visit_class(c: Class) -> Result<semantic::Class, semantic::SemanticError> {

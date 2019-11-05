@@ -222,10 +222,6 @@ pub mod lexer {
 pub mod past {
     use super::lexer::{Span};
 
-	pub trait AstWalk<V: Visitor> {
-		fn accept(v: &mut V) -> Re
-	}
-
     #[derive(Debug)]
     pub struct Program {
 		pub classes: Vec<ClassNode>
@@ -470,7 +466,7 @@ pub mod past {
 		JustThis,
 		JustExpr(Expression),
 		NewObj(String, ActualArgs),
-		CallFunc(String, ActualArgs),
+		CallSelfMethod(String, ActualArgs),
 		CallMethod(Primary, String, ActualArgs),
 		CallSuper(String, ActualArgs),
 		EvalArray(ArrayExpr),
@@ -962,7 +958,7 @@ pub mod parser {
 
             Ident(id) actualargs[a] => NonNewArrayExpr{
                 span: span!(),
-                expr: NNAExpr::CallFunc(id, a),
+                expr: NNAExpr::CallSelfMethod(id, a),
             },
 
             primary[p] Dot Ident(id) actualargs[a] => NonNewArrayExpr{

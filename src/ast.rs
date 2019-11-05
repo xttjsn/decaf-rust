@@ -2,8 +2,28 @@ use crate::lnp::ast as Past;
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
+pub enum DecafType {
+	ClassType(Class),
+	IntType,
+	CharType,
+	StringType,
+	VoidType,
+	ArrayType(Box<DecafType>),
+}
+
+pub enum DecafValueKind {
+	Value,
+	Location,
+}
+
+pub struct DecafValue {
+	llvmval: LLVMValueRef,
+	ty: DecafType,
+	kind; DecafValueKind,
+}
+
 trait AST {
-	fn gencode() -> Result<Value>;
+	fn gencode() -> Result<DecafValue>;
 }
 
 enum Visibility {
@@ -397,6 +417,6 @@ impl GenCode for MethodCall {
 
 impl GenCode for NewExpr {
 	fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<DecafValue> {
-
+		// Malloc
 	}
 }
