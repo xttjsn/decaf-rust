@@ -276,6 +276,9 @@ impl GenCode for MethodCall {
 					// method of cls or ant of its super class
 					// For now we assume type checker is already done
 
+					// We assume all functions resides in vtable
+					// (regardless of whether it's virtual or not)
+
 					// Evaluate all arguments first
 					let mut vs = vec![];
 					for expr in self.args.iter() {
@@ -283,46 +286,117 @@ impl GenCode for MethodCall {
 					}
 
 					// Get vtable location
-					let svtable_loc: LLVMValueRef = cls.get_static_vtable()?;
+					let mut num_meta: u32 = DECAF_METADATA_NUM;
+					let metadata = LLVMGlobalCopyAllMetadata(cls.structval, &mut num_meta as *mut _);
+					let vtable = LLVMValueMetadataEntriesGetMetadata(metedata, 0);
+					let vtable = LLVMMetadataAsValue(llvm.ctx, vtable);
+					// TODO: Verify kind
+					let num_entries = LLVMGetMDNodeNumOperands(vtable);
+					let mut vtable_entries: Vec<LLVMValueRef> = Vec::with_capacity(num_entries);
+					LLVMGetMDNodeOperands(vtable, vtable_entries.as_mut_ptr() as *mut _);
 
-					// Lookup method offset of the name
-					let method_offset: u32 = cls.get_method_offset(self.name)?;
-
-					// Load function pointer
-					let indices = [LLVMConstant(LLVMInt32Type(), 0, false), // Initial index to vtable struct
-								   LLVMConstant(LLVMInt32Type(), 0, false), // Second index to array
-								   LLVMConstant(LLVMInt32Type(), method_offset, false), // Last index to the method
-					];
-
-					// This is the function pointer's location
-					let method_fn_loc = LLVMBuildGEP(llvm.builder,
-													 svtable_loc,
-													 indices.as_ptr() as *mut _,
-													 3,
-													 b"load_static_vmethod_ptrptr\0".as_ptr() as *const _);
-					let method_fn = LLVMBuildLoad(llvm.builder, method_fn_loc, b"load_static_vmethod_ptr\0".as_ptr() as *const _);
-
-					// Call the function
+					// Lookup method index
+					let method_ix = cls.get_method_ix(self.name)?;
 					let val = LLVMBuildCall(llvm.builder,
-											method_fn,
+											vtable_entries[method_ix],
 											vs.as_slice().as_mut_ptr(),
 											vs.len(),
-											b"staic_method_call\0".as_ptr() as *const _);
+											b"static_method_call\0".as_ptr() as *const _);  // TODO: use "static_method_call" + name
 
 					return val;
 
 				},
 				ObjectSubject(obj) => {
+					let mut vs = vec![obj.thisval];
+					for expr in self.args.iter() {
+						vs.push(expr.gencode()?);
+					}
 
+					// Get vtable location
+					let mut num_meta: u32 = DECAF_METADATA_NUM;
+					let metadata = LLVMGlobalCopyAllMetadata(obj.structval, &mut num_meta as *mut _);
+					let vtable = LLVMValueMetadataEntriesGetMetadata(metadata, 0);
+					let num_entries = LLVMGetMDNodeNumOperands(vtable);
+					let mut vtable_entries: Vec<LLVMValueRef> = Vec::with_capacity(num_entries);  // FIXME: we may have to put dummy data in there
+					LLVMGetMDNodeOperands(vtable, vtable_entries.as_mut_ptr() as *mut _);
+					let method_ix = cls.get_method_ix(self.name)?;
+					let val = LLVMBuildCall(llvm.builder,
+											vtable_entries[method_ix],
+											vs.as_slice().as_mut_ptr(),
+											vs.len(),
+											b"object_method_call\0".as_ptr() as *const _);  // TODO: put name in there
 				},
-				SuperSubject(sup) => {
+				SuperSubject(cls) => {
+					// Note: cls is the immediate parent class of "this"
 
+					// And this can only be an object method call,
+					// since we do not allow "super" to appear in a
+					// static call
+
+					// In a valid AST, cls will have the method, so we
+					// don't have to traverse the parent tree
+
+					let mut vs = vec![obj.thisval];
+					for expr in self.args.iter() {
+						vs.push(expr.gencode()?);
+					}
+
+					// Get vtable location
+					let mut num_meta: u32 = DECAF_METADATA_NUM;
+					let metadata = LLVMGlobalCopyAllMetadata(cls.structval, &mut num_meta as *mut _);
+					let vtable = LLVMValueMetadataEntriesGetMetadata(metedata, 0);
+					let vtable = LLVMMetadataAsValue(llvm.ctx, vtable);
+					// TODO: Verify kind
+					let num_entries = LLVMGetMDNodeNumOperands(vtable);
+					let mut vtable_entries: Vec<LLVMValueRef> = Vec::with_capacity(num_entries);
+					LLVMGetMDNodeOperands(vtable, vtable_entries.as_mut_ptr() as *mut _);
+
+					// Lookup method index
+					let method_ix = cls.get_method_ix(self.name)?;
+					let val = LLVMBuildCall(llvm.builder,
+											vtable_entries[method_ix],
+											vs.as_slice().as_mut_ptr(),
+											vs.len(),
+											b"static_method_call\0".as_ptr() as *const _);  // TODO: use "static_method_call" + name
+
+					return val;
 				},
 				MethodCallSubject(m) => {
+					// First generate code for m
 
+					// In a valid AST, the value returned from
+					// m.gencode() is the location of the object
+					unsafe {
+						let mut val = m.gencode(llvm);
+						let obj = val.get_object()?;
+
+						let mut vs = vec![obj.thisval];
+						for expr in self.args.iter() {
+							vs.push(expr.gencode()?);
+						}
+
+						// Get vtable location
+						let mut num_meta: u32 = DECAF_METADATA_NUM;
+						let metadata = LLVMGlobalCopyAllMetadata(obj.structval, &mut num_meta as *mut _);
+						let vtable = LLVMValueMetadataEntriesGetMetadata(metadata, 0);
+						let num_entries = LLVMGetMDNodeNumOperands(vtable);
+						let mut vtable_entries: Vec<LLVMValueRef> = Vec::with_capacity(num_entries);  // FIXME: we may have to put dummy data in there
+						LLVMGetMDNodeOperands(vtable, vtable_entries.as_mut_ptr() as *mut _);
+						let method_ix = cls.get_method_ix(self.name)?;
+						let val = LLVMBuildCall(llvm.builder,
+												vtable_entries[method_ix],
+												vs.as_slice().as_mut_ptr(),
+												vs.len(),
+												b"object_method_call\0".as_ptr() as *const _);  // TODO: put name in there
+					}
 				},
 			}
 		}
+	}
+}
+
+impl GenCode for NewExpr {
+	fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<DecafValue> {
 
 	}
 }

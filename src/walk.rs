@@ -67,3 +67,79 @@ impl Visitor {
 	}
 
 }
+
+
+impl TreeWalk for Class {
+	fn walk(self, &mut llvm: CompilerConstruct) -> Self {
+		// Assume Class is a valid AST node
+		// 2 tasks:
+		//     1. Generate an LLVM type for the class
+		//     2. Add function for each methods and put them in metadata
+
+		// Fields and private methods
+		let	types: Vec<LLVMValueRef> = Vec::with_capcity(self.fields.len() +
+													  self.priv_methods.len());
+		for field in self.fields.iter() {
+			types.push(field.ty);
+		}
+
+		for func in self.priv_methods.iter() {
+			types.push(func.ty);
+		}
+
+		let clstype = LLVMStructTypeInContext(llvm.ctx,
+											  types.as_mut_slice().as_mut_ptr() as *mut _,
+											  types.len(),
+											  true);
+
+		// Pubic and protected methods
+
+		// We assume that at this stage the class node has already
+		// inherited all the public and protected methods from its
+		// parent
+		let funcs: Vec<LLVMValueRef> = Vec::with_capacity(self.pub_methods.len() +
+														  self.prot_methods.len());
+
+		for func in self.pub_methods.iter() {
+			unsafe {
+				let ftype = LLVMFunctionType(func.return_type,
+											 func.param_types.as_mut_slice().as_ptr() as *mut _,
+											 func.param_count,
+											 false);
+				let funval = LLVMAddFunction(llvm.module,
+											 func.name as *const _,
+											 ftype);
+				funcs.push(funval);
+			}
+		}
+
+		for func in self.prot_methods.iter() {
+			unsafe {
+				let ftype = LLVMFunctionType(func.return_type,
+											 func.param_types.as_mut_slice().as_ptr() as *mut _,
+											 func.param_count,
+											 false);
+				let funval = LLVMAddFunction(llvm.module,
+											 func.name as *const _,
+											 ftype);
+				funcs.push(funval);
+			}
+		}
+
+		// Convert all functions to metadata
+		let func_metas = Vec::with_capcity(self.pub_methods.len() +
+										   self.prot_methods.len());
+		for func in funcs.iter() {
+			func_metas.push(LLVMValueAsMetadata(func));
+		}
+
+		// Gete MD node
+		let func_md = LLVMMDNodeInContext2(llvm.ctx,
+										   func_metas.as_mut_slice().as_ptr() as *mut _,
+										   func_metas.len());
+
+		// Associate MD node with the class type
+		let cls_undef = LLVMGetUndef(clstype);
+		LLVMGlobalSetMetadata(cls_undef, DECAF_METADATA_VTABLE_KIND, func_md);
+	}
+}
