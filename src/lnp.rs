@@ -1,5 +1,6 @@
 #![feature(proc_macro_hygiene)]
 extern crate plex;
+use self::treebuild::Normalize;
 
 pub mod lexer {
     use plex::lexer;
@@ -284,11 +285,6 @@ pub mod past {
 	}
 
 	#[derive(Debug)]
-	pub struct ModNode {
-		pub span: Span,
-	}
-
-	#[derive(Debug)]
 	pub struct FormalArgs {
 		pub span: Span,
 		pub farg_list: Vec<FormalArg>,
@@ -343,7 +339,7 @@ pub mod past {
 	#[derive(Debug)]
 	pub enum VarDeclaratorIdInner {
 		Single(String),
-		Array(Box<VarDeclaratorId>)
+		Array(VarDeclaratorId)
 	}
 
 	#[derive(Debug)]
@@ -373,26 +369,26 @@ pub mod past {
 		BlockStmt(Block)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Expression {
 		pub span: Span,
 		pub expr: Expr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Expr {
 		BinaryExpr(Box<Expression>, BinaryOp, Box<Expression>),
 		UnaryExpr(UnaryOp, Box<Expression>),
 		PrimaryExpr(Primary)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct BinaryOp {
 		pub span: Span,
 		pub op: BinOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum BinOp {
 		AssignOp,
 		LogicalOrOp,
@@ -410,57 +406,57 @@ pub mod past {
 		ModOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct UnaryOp {
 		pub span: Span,
 		pub op: UnOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum UnOp {
 		PlusUOp,
 		MinusUOp,
 		NotUOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Primary {
 		pub span: Span,
 		pub prim: Prim,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Prim {
 		NewArray(NewArrayExpr),
 		NonNewArray(Box<NonNewArrayExpr>),
 		Identifier(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct NewArrayExpr {
 		pub span: Span,
 		pub expr: NAExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum NAExpr {
 		NewCustom(String, Vec<Dimension>),
 		NewPrimitive(PrimitiveType, Vec<Dimension>),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Dimension {
 		pub span: Span,
 		pub expr: Expression
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct NonNewArrayExpr {
 		pub span: Span,
 		pub expr: NNAExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum NNAExpr {
 		JustLit(Literal),
 		JustThis,
@@ -473,37 +469,37 @@ pub mod past {
 		EvalField(FieldExpr)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct FieldExpr {
 		pub span: Span,
 		pub expr: FExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum FExpr {
 		PrimaryFieldExpr(Primary, String),
 		SuperFieldExpr(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct ArrayExpr {
 		pub span: Span,
 		pub expr: AExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum AExpr {
 		SimpleArraryExpr(String, Dimension),
 		ComplexArrayExpr(Box<NonNewArrayExpr>, Dimension),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Literal {
 		pub span: Span,
 		pub litr: Litr
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Litr {
 		Null,
 		Bool(bool),
@@ -512,7 +508,7 @@ pub mod past {
 		Str(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct ActualArgs {
 		pub span: Span,
 		pub exprs: Vec<Expression>,
@@ -718,7 +714,7 @@ pub mod parser {
 			},
 			vardeclid[id] BracketPair => VarDeclaratorId {
 				span: span!(),
-				id: VarDeclaratorIdInner::Array(Box::new(id)),
+				id: VarDeclaratorIdInner::Array(id),
 			}
 		}
 
