@@ -120,6 +120,8 @@ enum Statement {
 }
 
 
+
+
 pub mod convert {
 	pub fn parse_tree_to_ast(ptree Past::Program) -> Program {
 		let mut ast_builder = AstBuilder::new();
@@ -127,6 +129,7 @@ pub mod convert {
 		p = ptree.accept(ast_builder)?;
 	}
 }
+
 
 
 impl GenCode for IfStmt {
@@ -413,6 +416,40 @@ impl GenCode for MethodCall {
 			}
 		}
 	}
+}
+
+impl GenCode for UnaryOp{
+    fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<LLVMValueRef>{
+        unsafe {
+            let func = LLVMGetBasicBlockParent(LLVMGetInsertBlock(llvm.builder));
+
+            let oprval = self.etype.gencode()?;
+
+            match self.etype() {
+                ExperType::"-" =>{
+                    let oprval = LLVMBuildNeg(llvm.builder, oprval, b"oprval\0".as_ptr() as * const _); 
+
+                }
+
+                ExperType::"!" =>{
+                    let oprval = LLVMBuildNot(llvm.builder, oprval, b"oprval\0".as_ptr() as * const _); 
+                }
+
+            }
+
+        }
+    }
+}
+
+impl GenCode for BinaryOp{
+    fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<LLVMValueRef>{
+        unsafe {
+            let func = LLVMGetBasicBlockParent(LLVMGetInsertBlock(llvm.builder));
+
+
+
+        }
+    }
 }
 
 impl GenCode for NewExpr {
