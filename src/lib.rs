@@ -2,3 +2,4 @@
 mod lnp;
 mod decaf;
 mod treebuild;
+mod test;

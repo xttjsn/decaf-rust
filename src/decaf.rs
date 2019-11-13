@@ -1,9 +1,11 @@
 use std::rc::Rc;
 use std::fmt;
+use std::collections::BTreeSet;
+use std::cell::RefCell;
 use crate::lnp;
 
 pub enum SemanticError{
-	ClassRedefinition(Rc<Class>),
+	ClassRedefinition(String),
 	BadImplementation(String),
 	InvalidModifier(lnp::lexer::Span)
 }
@@ -11,12 +13,20 @@ pub enum SemanticError{
 impl fmt::Display for SemanticError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		use self::SemanticError::*;
-		match *self {
-			ClassRedefinition(c) => write!(f, "redefinition of class {}", c.name),
+		match self {
+			ClassRedefinition(cls_name) => write!(f, "redefinition of class {}", cls_name),
 			BadImplementation(why) => write!(f, "bad implementation: {}", why),
 			InvalidModifier(loc) => write!(f, "invalid modifier at {},{}", loc.lo, loc.hi),
 		}
 	}
+}
+
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Visibility {
+	Pub,
+	Priv,
+	Prot
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -33,24 +43,28 @@ pub enum TypeBase {
 	CharTy,
 	VoidTy,
 	ClassTy(Rc<Class>),
+	FuncTy(Rc<Function>),
+	MethodTy(Rc<Method>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Function {
-	pub return_ty: Type,
-	pub args: Vec<(String, Type)>,
+	pub name: String,
+	pub return_ty: RefCell<Rc<Type>>,
+	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Method {
-	pub return_ty: Type,
-	pub args: Vec<(String, Type)>,
+	pub name: String,
+	pub return_ty: Rc<Type>,
+	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Ctor {
 	pub cls: Rc<Class>,
-	pub args: Vec<(String, Type)>
+	pub args: RefCell<Vec<(String, Rc<Type>)>>
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -75,65 +89,65 @@ pub enum Scope {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Field {
 	pub name: String,
-	pub ty: Type,
-	pub init_expr: Option<Expr>,
+	pub ty: RefCell<Rc<Type>>,
+	pub init_expr: RefCell<Option<Rc<Expr>>>,
 }
 
 impl Field {
-	fn new(name: String) -> Field {
+	pub fn new(name: String) -> Field {
 		Self {
 			name: name,
-			ty: Type {
-				base: TypeBase::UnknownTy("Unknown"),
+			ty: RefCell::new(Rc::new(Type {
+				base: TypeBase::UnknownTy("Unknown".to_string()),
 				array_lvl: 0,
-			},
-			init_expr: None,
+			})),
+			init_expr: RefCell::new(None),
 		}
 	}
 
-	fn set_base_type(&mut self, ty: Type) {
-		self.ty = ty;
+	pub fn set_base_type(self: Rc<Self>, ty: Rc<Type>) {
+		*self.ty.borrow_mut() = ty;
 	}
 
-	fn set_init_expr(&mut self, expr: Expr) {
-		self.init_expr = Some(expr);
+	fn set_init_expr(self: Rc<Self>, expr: Rc<Expr>) {
+		*self.init_expr.borrow_mut() = Some(expr);
 	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Class {
 	pub name: String,
-	pub sup: Option<Rc<Class>>,
-	pub inh_fields: Vec<Field>,
-	pub fields: Vec<Field>,
-	pub ctors: Vec<Ctor>,
-	pub vtable: Vec<Method>,
-	pub priv_methods: Vec<Method>,
-	pub static_methods: Vec<Function>,
+	pub sup: RefCell<Option<Rc<Class>>>,
+	pub inh_fields: RefCell<Vec<Rc<Field>>>,
+	pub fields: RefCell<Vec<Rc<Field>>>,
+	pub ctors: RefCell<Vec<Rc<Ctor>>>,
+	pub vtable: RefCell<Vec<Rc<Method>>>,
+	pub priv_methods: RefCell<Vec<Rc<Method>>>,
+	pub static_methods: RefCell<Vec<Rc<Function>>>,
 }
 
 impl Class {
-	fn new(name: String) -> Self {
+	pub fn new(name: String) -> Self {
 		Class {
 			name: name,
-			sup: None,
-			inh_fields: vec![],
-			fields: vec![],
-			ctors: vec![],
-			vtable: vec![],
-			priv_methods: vec![],
-			static_methods: vec![],
+			sup: RefCell::new(None),
+			inh_fields: RefCell::new(vec![]),
+			fields: RefCell::new(vec![]),
+			ctors: RefCell::new(vec![]),
+			vtable: RefCell::new(vec![]),
+			priv_methods: RefCell::new(vec![]),
+			static_methods: RefCell::new(vec![]),
 		}
 	}
 
-	fn has_definition_for(vtable: &Vec<Method>, method: &Method) -> bool {
+	fn has_definition_for(vtable: &Vec<Rc<Method>>, method: &Rc<Method>) -> bool {
 		match Class::get_method_idx_from_vtable(vtable, method) {
 			None => false,
 			Some(_) => true,
 		}
 	}
 
-	fn get_method_idx_from_vtable(vtable: &Vec<Method>, method: &Method) -> Option<usize> {
+	fn get_method_idx_from_vtable(vtable: &Vec<Rc<Method>>, method: &Rc<Method>) -> Option<usize> {
 		for (ix, child_method) in vtable.iter().enumerate() {
 			if child_method == method {
 				return Some(ix)
@@ -142,39 +156,47 @@ impl Class {
 		None
 	}
 
-	fn merge_vtable(child_vtable: Vec<Method>, parent_vtable: &Vec<Method>) -> Vec<Method> {
+	fn merge_vtable(child_vtable: &Vec<Rc<Method>>, parent_vtable: &Vec<Rc<Method>>) -> Vec<Rc<Method>> {
 		// Merge two vtables and maintain orders
-		let result = vec![];
+		let mut result = vec![];
+		let mut mask = BTreeSet::new();
 		for method in parent_vtable.iter() {
 			if Class::has_definition_for(&child_vtable, method) {
-				result.push(*method.clone());
-				child_vtable.remove(Class::get_method_idx_from_vtable(&child_vtable, method).unwrap());
+				result.push(method.clone());
+				mask.insert(Class::get_method_idx_from_vtable(&child_vtable, method).unwrap());
 			} else {
-				result.push(*method.clone());
+				result.push(method.clone());
 			}
 		}
-		for method in child_vtable.into_iter() {
-			result.push(method);
+		for (ix, method) in child_vtable.iter().enumerate() {
+			if !mask.contains(&ix) {
+				result.push(method.clone());
+			}
 		}
 		result
 	}
 
-	fn merge_fields(inh_fields: &Vec<Field>, fields: &Vec<Field>) -> Vec<Field> {
-		let result = vec![];
-		result.extend(inh_fields.into_iter().map(|x| *x));
-		result.extend(fields.into_iter().map(|x| *x));
+	fn merge_fields(inh_fields: &Vec<Rc<Field>>, fields: &Vec<Rc<Field>>) -> Vec<Rc<Field>> {
+		let mut result = vec![];
+		result.extend(inh_fields.iter().map(|x| x.clone()));
+		result.extend(fields.iter().map(|x| x.clone()));
 		result
 	}
 
-	fn set_super(self: Rc<Self>, supr: Rc<Class>) {
+	pub fn set_super(self: Rc<Class>, supr: Rc<Class>) {
 		// supr must be a resolved class
-		match supr.sup {
+		match *supr.sup.borrow() {
 			None if supr.name != "Object" => panic!("Super class is not resolved"),
 			_ => {}
 		}
 
+		// Set super
+		*self.sup.borrow_mut() = Some(supr.clone());
+
 		// Set vtable and inherit fields
-		self.vtable = Class::merge_vtable(self.vtable, &supr.vtable);
-		self.inh_fields = Class::merge_fields(&supr.inh_fields, &supr.fields);
+		let new_vtable = Self::merge_vtable(&*self.vtable.borrow(), &*supr.vtable.borrow());
+		*self.vtable.borrow_mut() = new_vtable;
+		let new_inh_fields = Self::merge_fields(&*supr.inh_fields.borrow(), &*supr.fields.borrow());
+		*self.inh_fields.borrow_mut() = new_inh_fields;
 	}
 }
