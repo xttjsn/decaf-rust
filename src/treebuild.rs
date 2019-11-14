@@ -241,11 +241,11 @@ impl Scope {
 pub struct DecafTreeBuilder {
 	pub state: BuilderState,
 	pub scopes: Vec<decaf::Scope>,
-	pub class_hooks: BTreeMap<String, Vec<Box<dyn FnMut(Rc<decaf::Class>)>>>,
+	pub class_hooks: BTreeMap<String, Vec<ClassHook>>,
 	pub class_map: BTreeMap<String, Rc<decaf::Class>>,
 }
 
-type ClassHook = Box<dyn FnMut(Rc<decaf::Class>)>;
+type ClassHook = Box<dyn FnMut(Rc<decaf::Class>) -> Option<Rc<decaf::Class>>>;
 
 impl DecafTreeBuilder {
 	pub fn new() -> Self {
@@ -322,8 +322,30 @@ impl DecafTreeBuilder {
 		self.class_map.insert(cls_name, cls);
 	}
 
-	fn add_class_resolution_hook(&mut self, cls_name: String, f: Box<dyn FnMut(Rc<decaf::Class>)>) {
+	fn add_class_resolution_hook(&mut self, cls_name: String, f: ClassHook) {
 		self.class_hooks.entry(cls_name).or_insert(vec![]).push(f);
+	}
+
+	fn invoke_class_resolution_hook(&mut self, cls_name: String, cls: Rc<decaf::Class>) {
+		fn go(class_hooks: &mut BTreeMap<String, Vec<ClassHook>>,
+			  cls_name: String,
+			  cls: Rc<decaf::Class>) {
+
+			let mut tmp = vec![];
+			if let Some(hooks) = class_hooks.remove(&cls_name) {
+				for mut hook in hooks.into_iter() {
+					if let Some(resolved_cls) = hook(cls.clone()) {
+						tmp.push(resolved_cls);
+					}
+				}
+			}
+
+			for resolved_cls in tmp.into_iter() {
+				go(class_hooks, resolved_cls.name.clone(), resolved_cls.clone());
+			}
+		}
+
+		go(&mut self.class_hooks, cls_name, cls);
 	}
 
 	fn get_curr_scope_as_class(&self) -> Rc<decaf::Class>{
@@ -388,6 +410,8 @@ impl Visitor for DecafTreeBuilder {
 																   Box::new(
 																	   move |cls| {
 																		   tmp.clone().set_super(cls);
+																		   // Resolve
+																		   Some(tmp.clone())
 																	   }));
 								},
 								Some(supcls) => {
@@ -412,6 +436,12 @@ impl Visitor for DecafTreeBuilder {
 					}
 
 					self.scopes.pop();
+
+					// If the class is fully resolved invoke class resolution hook for it
+					// A class is fully resolved if it has a known super
+					if let Some(_) = *new_class.sup.borrow() {
+						self.invoke_class_resolution_hook(new_class.name.clone(), new_class.clone());
+					}
 
 					Ok(BuilderResult::Normal)
 				}
@@ -457,6 +487,7 @@ impl Visitor for DecafTreeBuilder {
 															   base: ClassTy(cls_ty),
 															   array_lvl: array_lvl,
 														   }));
+														   None
 													   }
 												   ))) {
 						field_node.set_base_type(Rc::new(field_type));
@@ -523,6 +554,7 @@ impl Visitor for DecafTreeBuilder {
 																   base: ClassTy(cls_ty),
 																   array_lvl: array_lvl,
 															   });
+															   None
 														   }
 													   ))) {
 					*method_node.return_ty.borrow_mut() = Rc::new(return_ty);
@@ -540,6 +572,7 @@ impl Visitor for DecafTreeBuilder {
 																	base: ClassTy(cls_ty),
 																	array_lvl: array_lvl,
 																}));
+																None
 															}
 														))) {
 						method_node.add_arg(arg_name, Rc::new(arg_ty));
@@ -616,6 +649,7 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
+
 		Ok(BuilderResult::Normal)
 	}
 
