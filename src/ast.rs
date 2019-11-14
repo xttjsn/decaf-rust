@@ -426,6 +426,7 @@ impl GenCode for UnaryOp{
             let oprval = self.etype.gencode()?;
 
             match self.etype() {
+                
                 ExperType::"-" =>{
                     let oprval = LLVMBuildNeg(llvm.builder, oprval, b"oprval\0".as_ptr() as * const _); 
 
@@ -433,6 +434,11 @@ impl GenCode for UnaryOp{
 
                 ExperType::"!" =>{
                     let oprval = LLVMBuildNot(llvm.builder, oprval, b"oprval\0".as_ptr() as * const _); 
+                }
+
+                ExperType::"location" =>{
+                    let oprval = LLVMBuildLoad(llvm.builder, oprval, b"oprval\0".as_ptr() as * const_);
+
                 }
 
             }
@@ -444,11 +450,48 @@ impl GenCode for UnaryOp{
 impl GenCode for BinaryOp{
     fn gencode(&mut self, &mut llvm: CompilerConstruct) -> Res<LLVMValueRef>{
         unsafe {
-            let func = LLVMGetBasicBlockParent(LLVMGetInsertBlock(llvm.builder));
+            let left = self.lhs.gencode()?;
+            let right = self.rhs.gencode()?;
+
+            match self.left.etype(){
+                ExperType::"location" =>{
+                    let left = LLVMBuildLoad(llvm.builder, left, b"left\0".as_ptr() as * const _);
+                }
+            }
+
+ match self.right.etype(){
+                ExperType::"location" =>{
+                    let right = LLVMBuildLoad(llvm.builder, right, b"right\0".as_ptr() as * const _);
+                }
+            }
+
+ match self.oprtype(){
+     OperType::"+"{
+         let v = LLVMBuildAdd(llvm.builder, left, right, b"add\0".as_ptr() as * const _)
+     }
+
+OperType::"-"{
+         let v = LLVMBuildSub(llvm.builder, left, right, b"sub\0".as_ptr() as * const _)
+     }
+OperType::"*"{
+         let v = LLVMBuildMul(llvm.builder, left, right, b"Mul\0".as_ptr() as * const _)
+     }
+OperType::"/"{
+         let v = LLVMBuildSDiv(llvm.builder, left, right, b"Div\0".as_ptr() as * const _)
+     }
+
+OperType::"%"{
+         let v = LLVMBuildSRem(llvm.builder, left, right, b"Rem\0".as_ptr() as * const _)
+     }
+
+OperType::"=="{
+         let v = LLVMBuildSICmp(llvm.builder, left, right, b"EqualComp\0".as_ptr() as * const _)
+     }
+
+ }
 
 
 
-        }
     }
 }
 

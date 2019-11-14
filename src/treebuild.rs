@@ -1,3 +1,23 @@
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn trivial_test() -> Result<(), String> {
+        // Initialize LLVM(prologue)
+        //
+        //
+        // Do gencode here
+        //
+        //
+        // Output LLVM IR(epilogue)
+        //
+        //
+        // Execute it by Command(lli, "")
+        //
+        // Assert the result
+    }
+}
+
 trait Visitor {
 	use crate::lnp::past::*;
 
