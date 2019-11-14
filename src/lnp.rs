@@ -1,4 +1,3 @@
-#![feature(proc_macro_hygiene)]
 extern crate plex;
 
 pub mod lexer {
@@ -235,20 +234,20 @@ pub mod past {
 		pub member_list: Vec<Member>,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct SuperNode {
 		pub span: Span,
 		pub name: String
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Member {
 		FieldMember(Field),
 		MethodMember(Method),
 		CtorMember(Ctor),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Field {
 		pub span: Span,
 		pub modies: Vec<Modifier>,
@@ -256,7 +255,7 @@ pub mod past {
 		pub var_decl: Vec<VarDeclarator>,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Method {
 		pub span: Span,
 		pub modies: Vec<Modifier>,
@@ -266,7 +265,7 @@ pub mod past {
 		pub block: Block,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Ctor {
 		pub span: Span,
 		pub modies: Vec<Modifier>,
@@ -275,7 +274,7 @@ pub mod past {
 		pub block: Block,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Modifier {
 		ModStatic(ModNode),
 		ModPublic(ModNode),
@@ -283,38 +282,38 @@ pub mod past {
 		ModProtected(ModNode),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct ModNode {
 		pub span: Span,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct FormalArgs {
 		pub span: Span,
 		pub farg_list: Vec<FormalArg>,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct FormalArgList {
 		pub span: Span,
 		pub fargs: Option<Vec<FormalArg>>
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct FormalArg {
 		pub span: Span,
 		pub ty: Type,
 		pub var_decl_id: VarDeclaratorId,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Type {
 		Primitive(PrimitiveType),
 		Custom(String),
 		Array(Box<Type>)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum PrimitiveType {
 		BoolType(PrimitiveTypeNode),
 		CharType(PrimitiveTypeNode),
@@ -322,43 +321,43 @@ pub mod past {
 		VoidType(PrimitiveTypeNode),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct PrimitiveTypeNode {
 		pub span: Span,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct VarDeclarator {
 		pub span: Span,
 		pub	vardeclid: VarDeclaratorId,
 		pub expr: Option<Expression>
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct VarDeclaratorId {
 		pub span: Span,
 		pub id: VarDeclaratorIdInner,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum VarDeclaratorIdInner {
 		Single(String),
 		Array(Box<VarDeclaratorId>)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Block {
 		pub span: Span,
 		pub stmts: Vec<Statement>
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Statement {
 		pub span: Span,
 		pub stmt: Stmt,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Stmt {
 		EmptyStmt,
 		DeclareStmt(Type, Vec<VarDeclarator>),
@@ -373,26 +372,26 @@ pub mod past {
 		BlockStmt(Block)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Expression {
 		pub span: Span,
 		pub expr: Expr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Expr {
 		BinaryExpr(Box<Expression>, BinaryOp, Box<Expression>),
 		UnaryExpr(UnaryOp, Box<Expression>),
 		PrimaryExpr(Primary)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct BinaryOp {
 		pub span: Span,
 		pub op: BinOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum BinOp {
 		AssignOp,
 		LogicalOrOp,
@@ -410,57 +409,57 @@ pub mod past {
 		ModOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct UnaryOp {
 		pub span: Span,
 		pub op: UnOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum UnOp {
 		PlusUOp,
 		MinusUOp,
 		NotUOp,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Primary {
 		pub span: Span,
 		pub prim: Prim,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Prim {
 		NewArray(NewArrayExpr),
 		NonNewArray(Box<NonNewArrayExpr>),
 		Identifier(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct NewArrayExpr {
 		pub span: Span,
 		pub expr: NAExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum NAExpr {
 		NewCustom(String, Vec<Dimension>),
 		NewPrimitive(PrimitiveType, Vec<Dimension>),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Dimension {
 		pub span: Span,
 		pub expr: Expression
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct NonNewArrayExpr {
 		pub span: Span,
 		pub expr: NNAExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum NNAExpr {
 		JustLit(Literal),
 		JustThis,
@@ -473,37 +472,37 @@ pub mod past {
 		EvalField(FieldExpr)
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct FieldExpr {
 		pub span: Span,
 		pub expr: FExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum FExpr {
 		PrimaryFieldExpr(Primary, String),
 		SuperFieldExpr(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct ArrayExpr {
 		pub span: Span,
 		pub expr: AExpr,
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum AExpr {
 		SimpleArraryExpr(String, Dimension),
 		ComplexArrayExpr(Box<NonNewArrayExpr>, Dimension),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct Literal {
 		pub span: Span,
 		pub litr: Litr
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub enum Litr {
 		Null,
 		Bool(bool),
@@ -512,7 +511,7 @@ pub mod past {
 		Str(String),
 	}
 
-	#[derive(Debug)]
+	#[derive(Debug, Clone)]
 	pub struct ActualArgs {
 		pub span: Span,
 		pub exprs: Vec<Expression>,
@@ -520,7 +519,7 @@ pub mod past {
 }
 
 pub mod parser {
-    use super::ast::*;
+    use super::past::*;
     use super::lexer::Token::*;
     use super::lexer::*;
     use plex::parser;
@@ -858,10 +857,6 @@ pub mod parser {
 				span: span!(),
 				op: BinOp::MinusOp,
 			},
-			Plus => BinaryOp {
-				span: span!(),
-				op: BinOp::PlusOp,
-			},
 			Times => BinaryOp {
 				span: span!(),
 				op: BinOp::TimesOp,
@@ -1073,3 +1068,7 @@ pub mod parser {
     }
 }
 
+pub fn parse_decaf<'a>(src: &'a str) -> past::Program {
+	let lexer = lexer::Lexer::new(src).inspect(|tok| eprintln!("tok: {:?}", tok));
+	parser::parse(lexer).unwrap()
+}
