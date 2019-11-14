@@ -857,10 +857,6 @@ pub mod parser {
 				span: span!(),
 				op: BinOp::MinusOp,
 			},
-			Plus => BinaryOp {
-				span: span!(),
-				op: BinOp::PlusOp,
-			},
 			Times => BinaryOp {
 				span: span!(),
 				op: BinOp::TimesOp,

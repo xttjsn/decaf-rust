@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::cmp::Ordering;
 use std::fmt;
 use std::collections::BTreeSet;
 use std::cell::RefCell;
@@ -43,22 +44,72 @@ pub enum TypeBase {
 	CharTy,
 	VoidTy,
 	ClassTy(Rc<Class>),
-	FuncTy(Rc<Function>),
 	MethodTy(Rc<Method>),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Function {
-	pub name: String,
-	pub return_ty: RefCell<Rc<Type>>,
-	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Method {
 	pub name: String,
-	pub return_ty: Rc<Type>,
+	pub return_ty: RefCell<Rc<Type>>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>,
+}
+
+impl Method {
+
+	pub fn new(name: String) -> Self {
+		Method {
+			name: name,
+			return_ty: RefCell::new(Rc::new(Type {
+				base: TypeBase::UnknownTy("Unknown".to_string()),
+				array_lvl: 0,
+			})),
+			args: RefCell::new(vec![]),
+		}
+	}
+
+	pub fn add_arg(&self, arg_name: String, arg_ty: Rc<Type>) {
+		// Check name conflicts
+		if self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+			panic!("argument name conflict in method")
+		}
+		self.args.borrow_mut().push((arg_name, arg_ty));
+	}
+
+	pub fn set_arg_type(&self, arg_name: String, arg_ty: Rc<Type>) {
+		if !self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+			panic!("argument not found in method")
+		}
+		self.args.replace_with(|v| v.into_iter().map(|(name, ty)| {
+			if name == &arg_name {
+				(name.clone(), arg_ty.clone())
+			} else {
+				(name.clone(), ty.clone())
+			}
+		}).collect());
+	}
+
+	pub fn has_same_signature(&self, other: &Self) -> bool {
+		if self.name != other.name {
+			return false;
+		}
+		if self.return_ty != other.return_ty {
+			return false;
+		}
+		if self.args.borrow().len() != other.args.borrow().len() {
+			return false;
+		}
+		for (lhs, rhs) in self.args.borrow().iter().zip(other.args.borrow().iter()) {
+			// Compare type
+			let (lhs, rhs) = (lhs.1.as_ref(), rhs.1.as_ref());
+			if lhs.array_lvl != rhs.array_lvl {
+				return false;
+			}
+			if lhs.base != rhs.base {
+				return false;
+			}
+		}
+		return true;
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -80,7 +131,6 @@ pub struct Expr {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Scope {
 	ClassScope(Rc<Class>),
-	FunctionScope(Rc<Function>),
 	MethodScope(Rc<Method>),
 	BlockScope(Rc<Block>),
 	GlobalScope,
@@ -105,11 +155,11 @@ impl Field {
 		}
 	}
 
-	pub fn set_base_type(self: Rc<Self>, ty: Rc<Type>) {
+	pub fn set_base_type(&self, ty: Rc<Type>) {
 		*self.ty.borrow_mut() = ty;
 	}
 
-	fn set_init_expr(self: Rc<Self>, expr: Rc<Expr>) {
+	fn set_init_expr(&self, expr: Rc<Expr>) {
 		*self.init_expr.borrow_mut() = Some(expr);
 	}
 }
@@ -118,12 +168,27 @@ impl Field {
 pub struct Class {
 	pub name: String,
 	pub sup: RefCell<Option<Rc<Class>>>,
-	pub inh_fields: RefCell<Vec<Rc<Field>>>,
-	pub fields: RefCell<Vec<Rc<Field>>>,
-	pub ctors: RefCell<Vec<Rc<Ctor>>>,
-	pub vtable: RefCell<Vec<Rc<Method>>>,
+	pub pub_fields: RefCell<Vec<Rc<Field>>>,
+	pub prot_fields: RefCell<Vec<Rc<Field>>>,
+	pub priv_fields: RefCell<Vec<Rc<Field>>>,
+	pub pub_ctors: RefCell<Vec<Rc<Ctor>>>,
+	pub prot_ctors: RefCell<Vec<Rc<Ctor>>>,
+	pub priv_ctors: RefCell<Vec<Rc<Ctor>>>,
+	pub pub_methods: RefCell<Vec<Rc<Method>>>,
+	pub prot_methods: RefCell<Vec<Rc<Method>>>,
 	pub priv_methods: RefCell<Vec<Rc<Method>>>,
-	pub static_methods: RefCell<Vec<Rc<Function>>>,
+	pub pub_static_methods: RefCell<Vec<Rc<Method>>>,
+	pub prot_static_methods: RefCell<Vec<Rc<Method>>>,
+	pub priv_static_methods: RefCell<Vec<Rc<Method>>>,
+}
+
+fn prepend<T>(v: &[T], s: &[T]) -> Vec<T>
+where
+	T: Clone,
+{
+	let mut tmp: Vec<_> = s.to_owned();
+	tmp.extend(v.to_owned());
+	tmp
 }
 
 impl Class {
@@ -131,56 +196,51 @@ impl Class {
 		Class {
 			name: name,
 			sup: RefCell::new(None),
-			inh_fields: RefCell::new(vec![]),
-			fields: RefCell::new(vec![]),
-			ctors: RefCell::new(vec![]),
-			vtable: RefCell::new(vec![]),
+			pub_fields: RefCell::new(vec![]),
+			prot_fields: RefCell::new(vec![]),
+			priv_fields: RefCell::new(vec![]),
+			pub_ctors: RefCell::new(vec![]),
+			prot_ctors: RefCell::new(vec![]),
+			priv_ctors: RefCell::new(vec![]),
+			pub_methods: RefCell::new(vec![]),
+			prot_methods: RefCell::new(vec![]),
 			priv_methods: RefCell::new(vec![]),
-			static_methods: RefCell::new(vec![]),
+			pub_static_methods: RefCell::new(vec![]),
+			prot_static_methods: RefCell::new(vec![]),
+			priv_static_methods: RefCell::new(vec![]),
 		}
 	}
 
-	fn has_definition_for(vtable: &Vec<Rc<Method>>, method: &Rc<Method>) -> bool {
-		match Class::get_method_idx_from_vtable(vtable, method) {
-			None => false,
-			Some(_) => true,
-		}
-	}
-
-	fn get_method_idx_from_vtable(vtable: &Vec<Rc<Method>>, method: &Rc<Method>) -> Option<usize> {
-		for (ix, child_method) in vtable.iter().enumerate() {
-			if child_method == method {
-				return Some(ix)
+	pub fn check_pub_method_defined_as_nonpub(&self, supr_pub_method: &Rc<Method>) -> Result<(), &'static str> {
+		for prot_method in self.prot_methods.borrow().iter() {
+			if prot_method.has_same_signature(supr_pub_method) {
+				return Err("parent public method redefined as protected method");
 			}
 		}
-		None
-	}
 
-	fn merge_vtable(child_vtable: &Vec<Rc<Method>>, parent_vtable: &Vec<Rc<Method>>) -> Vec<Rc<Method>> {
-		// Merge two vtables and maintain orders
-		let mut result = vec![];
-		let mut mask = BTreeSet::new();
-		for method in parent_vtable.iter() {
-			if Class::has_definition_for(&child_vtable, method) {
-				result.push(method.clone());
-				mask.insert(Class::get_method_idx_from_vtable(&child_vtable, method).unwrap());
-			} else {
-				result.push(method.clone());
+		for priv_method in self.priv_methods.borrow().iter() {
+			if priv_method.has_same_signature(supr_pub_method) {
+				return Err("parent public method redefined as private method");
 			}
 		}
-		for (ix, method) in child_vtable.iter().enumerate() {
-			if !mask.contains(&ix) {
-				result.push(method.clone());
-			}
-		}
-		result
+
+		Ok(())
 	}
 
-	fn merge_fields(inh_fields: &Vec<Rc<Field>>, fields: &Vec<Rc<Field>>) -> Vec<Rc<Field>> {
-		let mut result = vec![];
-		result.extend(inh_fields.iter().map(|x| x.clone()));
-		result.extend(fields.iter().map(|x| x.clone()));
-		result
+	pub fn check_prot_method_defined_as_nonprot(&self, supr_prot_method: &Rc<Method>) -> Result<(), &'static str> {
+		for pub_method in self.pub_methods.borrow().iter() {
+			if pub_method.has_same_signature(supr_prot_method) {
+				return Err("parent protected method redefined as public method");
+			}
+		}
+
+		for priv_method in self.priv_methods.borrow().iter() {
+			if priv_method.has_same_signature(supr_prot_method) {
+				return Err("parent protected method redefined as private method");
+			}
+		}
+
+		Ok(())
 	}
 
 	pub fn set_super(self: Rc<Class>, supr: Rc<Class>) {
@@ -193,10 +253,25 @@ impl Class {
 		// Set super
 		*self.sup.borrow_mut() = Some(supr.clone());
 
-		// Set vtable and inherit fields
-		let new_vtable = Self::merge_vtable(&*self.vtable.borrow(), &*supr.vtable.borrow());
-		*self.vtable.borrow_mut() = new_vtable;
-		let new_inh_fields = Self::merge_fields(&*supr.inh_fields.borrow(), &*supr.fields.borrow());
-		*self.inh_fields.borrow_mut() = new_inh_fields;
+		// Inherit public fields
+		let pub_fields = prepend(&self.pub_fields.borrow()[..], &supr.pub_fields.borrow()[..]);
+		*self.pub_fields.borrow_mut() = pub_fields;
+
+		let prot_fields = prepend(&self.prot_fields.borrow()[..], &supr.prot_fields.borrow()[..]);
+		*self.prot_fields.borrow_mut() = prot_fields;
+
+		// Inherit public methods
+		for supr_pub_method in supr.pub_methods.borrow().iter() {
+			self.check_pub_method_defined_as_nonpub(supr_pub_method).unwrap();
+		}
+		let pub_methods = prepend(&self.pub_methods.borrow()[..], &supr.pub_methods.borrow()[..]);
+		*self.pub_methods.borrow_mut() = pub_methods;
+
+		// Inherit protected methods
+		for supr_prot_method in supr.pub_methods.borrow().iter() {
+			self.check_prot_method_defined_as_nonprot(supr_prot_method).unwrap();
+		}
+		let prot_methods = prepend(&self.prot_methods.borrow()[..], &supr.prot_methods.borrow()[..]);
+		*self.prot_methods.borrow_mut() = prot_methods;
 	}
 }

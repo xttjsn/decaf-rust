@@ -1,7 +1,5 @@
 use crate::lnp;
 use crate::decaf;
-use std::borrow::BorrowMut;
-use std::cell::RefCell;
 use std::rc::Rc;
 use std::collections::BTreeMap;
 
@@ -80,29 +78,54 @@ trait Normalize {
 	fn normalize(&self) -> Self::Result;
 }
 
+fn ty2ty(ty: &lnp::past::Type, lvl: u32) -> (u32, decaf::TypeBase) {
+	// Count array nesting level from type
+	match ty {
+		lnp::past::Type::Primitive(prim) => {
+			match prim {
+				lnp::past::PrimitiveType::BoolType(_) => (lvl, decaf::TypeBase::BoolTy),
+				lnp::past::PrimitiveType::CharType(_) => (lvl, decaf::TypeBase::CharTy),
+				lnp::past::PrimitiveType::IntType(_) => (lvl, decaf::TypeBase::IntTy),
+				lnp::past::PrimitiveType::VoidType(_) => (lvl, decaf::TypeBase::VoidTy),
+			}
+		}
+		lnp::past::Type::Custom(cls_name) => (lvl, decaf::TypeBase::UnknownTy(cls_name.to_string())),
+		lnp::past::Type::Array(ty) => ty2ty(&*ty, lvl + 1),
+	}
+}
+
+impl Normalize for lnp::past::Method {
+	type Result = (decaf::TypeBase, u32, String, Vec<(String, decaf::TypeBase, u32)>, lnp::past::Block);
+
+	fn normalize(&self) -> Self::Result {
+		use crate::lnp::past::VarDeclaratorIdInner::*;
+		// Return type
+		let (array_lvl, return_type) = ty2ty(&self.ty, 0);
+
+		// Resolve argument type
+		// We do not allow Array of VarDeclaratorIdInner
+		let mut args = vec![];
+		for arg in self.fargs.farg_list.iter() {
+			let (arg_array_lvl, arg_type) = ty2ty(&arg.ty, 0);
+			match &arg.var_decl_id.id {
+				Single(arg_name) => {
+					args.push((arg_name.clone(), arg_type, arg_array_lvl));
+				},
+				Array(_) => panic!("array of ids are not allowed in method argument")
+			}
+		}
+
+		(return_type, array_lvl, self.name.clone(), args, self.block.clone())
+	}
+}
+
 impl Normalize for lnp::past::Field {
 	type Result = Vec<(decaf::TypeBase, u32, String, Option<lnp::past::Expression>)>;
 
 	fn normalize(&self) -> Self::Result {
 		let mut result = vec![];
 
-		fn go(ty: &lnp::past::Type, lvl: u32) -> (u32, decaf::TypeBase) {
-			// Count array nesting level from type
-			match ty {
-				lnp::past::Type::Primitive(prim) => {
-					match prim {
-						lnp::past::PrimitiveType::BoolType(_) => (lvl, decaf::TypeBase::BoolTy),
-						lnp::past::PrimitiveType::CharType(_) => (lvl, decaf::TypeBase::CharTy),
-						lnp::past::PrimitiveType::IntType(_) => (lvl, decaf::TypeBase::IntTy),
-						lnp::past::PrimitiveType::VoidType(_) => (lvl, decaf::TypeBase::VoidTy),
-					}
-				}
-				lnp::past::Type::Custom(cls_name) => (lvl, decaf::TypeBase::UnknownTy(cls_name.to_string())),
-				lnp::past::Type::Array(ty) => go(&*ty, lvl + 1),
-			}
-		}
-
-		let (array_lvl, decaf_type) = go(&self.ty, 0);
+		let (array_lvl, decaf_type) = ty2ty(&self.ty, 0);
 
 		for vard in self.var_decl.iter() {
 			let (cnt, name, expr) = vard.normalize();
@@ -151,31 +174,33 @@ pub enum BuilderResult {
 // }
 pub enum Scope {
 	ClassScope(Rc<decaf::Class>),
-	FunctionScope(Rc<decaf::Function>),
 	MethodScope(Rc<decaf::Method>),
 	BlockScope(Rc<decaf::Block>),
 }
 
 impl Scope {
-	fn symbol_lookup(&self, name: &str, ) -> Option<Rc<decaf::Type>> {
+	fn symbol_lookup(&self, name: &str) -> Option<Rc<decaf::Type>> {
 		use Scope::*;
 		match self {
 			ClassScope(cls) => {
 				// Field lookup
-				for field in cls.inh_fields.borrow().iter() {
-					if field.name == name {
-						return Some(field.ty.borrow().clone());
-					}
-				}
-
-				for field in cls.fields.borrow().iter() {
+				for field in cls.pub_fields.borrow().iter() {
 					if field.name == name {
 						return Some(field.ty.borrow().clone());
 					}
 				}
 
 				// Method lookup
-				for method in cls.vtable.borrow().iter() {
+				for method in cls.pub_methods.borrow().iter() {
+					if method.name == name {
+						return Some(Rc::new(decaf::Type {
+							base: decaf::TypeBase::MethodTy(method.clone()),
+							array_lvl: 0,
+						}));
+					}
+				}
+
+				for method in cls.prot_methods.borrow().iter() {
 					if method.name == name {
 						return Some(Rc::new(decaf::Type {
 							base: decaf::TypeBase::MethodTy(method.clone()),
@@ -193,18 +218,15 @@ impl Scope {
 					}
 				}
 
-				for func in cls.static_methods.borrow().iter() {
+				for func in cls.pub_static_methods.borrow().iter() {
 					if func.name == name {
 						return Some(Rc::new(decaf::Type {
-							base: decaf::TypeBase::FuncTy(func.clone()),
+							base: decaf::TypeBase::MethodTy(func.clone()),
 							array_lvl: 0,
 						}));
 					}
 				}
 				None
-			},
-			FunctionScope(func) => {
-				panic!("not implemented")
 			},
 			MethodScope(func) => {
 				panic!("not implemented")
@@ -223,8 +245,9 @@ pub struct DecafTreeBuilder {
 	pub class_map: BTreeMap<String, Rc<decaf::Class>>,
 }
 
-impl DecafTreeBuilder {
+type ClassHook = Box<dyn FnMut(Rc<decaf::Class>)>;
 
+impl DecafTreeBuilder {
 	pub fn new() -> Self {
 		DecafTreeBuilder {
 			state: BuilderState::First,
@@ -234,36 +257,59 @@ impl DecafTreeBuilder {
 		}
 	}
 
-	// fn type_lookup(&mut self, name: &String) -> Option<decaf::Type> {
-	// 	for scope in self.scopes.iter() {
-	// 		match scope.lookup(name) {
-	// 			Some(ty) => Some(ty),
-	// 			None => continue,
-	// 		}
-	// 	}
-	// 	None
-	// }
-
-	// fn type_add(&mut self, name: &String, ty: decaf::Type) {
-	// 	// Add type to the current scope
-	// 	match self.scopes.last_mut() {
-	// 		Some(curr_scope) => {
-	// 			curr_scope.add(name, ty.clone());
-	// 		},
-	// 		None => panic!("missing scope")
-	// 	}
-
-	// 	// If there are unresolved symbols within current scope
-	// 	// Check if name matches, if so invoke the resolution hook
-	// 	for hook in self.scopes
-	// 		.last_mut()
-	// 		.unwarp()
-	// 		.get_type_resolution_hooks(name).
-	// 		unwarp()
-	// 		.into_iter() {
-	// 		hook(ty.clone());
-	// 	}
-	// }
+	fn type_add(&mut self,
+				base_ty: decaf::TypeBase,
+				array_lvl: u32,
+				hook: Option<ClassHook>) -> Option<decaf::Type> {
+		use self::BuilderState::*;
+		use crate::decaf::Type;
+		use crate::decaf::TypeBase::*;
+		match self.state {
+			First => {
+				match base_ty {
+					UnknownTy(cls_name) => {
+						match self.class_lookup(cls_name.clone()) {
+							None => {
+								if let Some(hook) = hook {
+									self.add_class_resolution_hook(cls_name.clone(), hook);
+								}
+								None
+							}
+							Some(cls_base_ty) => {
+								Some(Type{
+									base: ClassTy(cls_base_ty.clone()),
+									array_lvl: array_lvl,
+								})
+							}
+						}
+					},
+					BoolTy | IntTy | CharTy  => Some(Type {
+						base: base_ty,
+						array_lvl: array_lvl,
+					}),
+					VoidTy => {
+						if array_lvl != 0 {
+							panic!("void type does not allow array");
+						}
+						Some(Type {
+							base: VoidTy,
+							array_lvl: 0,
+						})
+					},
+					ClassTy(cls) => Some(Type {
+						base: ClassTy(cls.clone()),
+						array_lvl: array_lvl,
+					}),
+					MethodTy(_) => {
+						panic!("bad field type: method");
+					}
+				}
+			},
+			Second => {
+				panic!("not implemented")
+			}
+		}
+	}
 
 	fn class_lookup(&self, cls_name: String) -> Option<Rc<decaf::Class>> {
 		match self.class_map.get(&cls_name) {
@@ -388,109 +434,54 @@ impl Visitor for DecafTreeBuilder {
 				for norm_field in field.normalize() {
 					let (ty, array_lvl, field_name, init_expr) = norm_field;
 
-					// Only allow 1 modifier and if it's pub/prot/priv
+					// Get current class
+					let curr_cls = self.get_curr_scope_as_class();
+
+					// Check name conflict
+					if curr_cls.pub_fields.borrow().iter().any(|f| f.name == field_name) ||
+						curr_cls.prot_fields.borrow().iter().any(|f| f.name == field_name) ||
+						curr_cls.priv_fields.borrow().iter().any(|f| f.name == field_name) {
+							panic!("field name conflict");
+						}
+
+					// Create field node
+					let field_node = Rc::new(crate::decaf::Field::new(field_name));
+					let tmp = field_node.clone();
+
+					// First check if we have change to reuse type
+					if let Some(field_type) = self.type_add(ty,
+												   array_lvl,
+												   Some(Box::new(
+													   move |cls_ty| {
+														   tmp.clone().set_base_type(Rc::new(Type{
+															   base: ClassTy(cls_ty),
+															   array_lvl: array_lvl,
+														   }));
+													   }
+												   ))) {
+						field_node.set_base_type(Rc::new(field_type));
+					}
+
+					// Only allow 0/1 modifier and if it's pub/prot/priv
 					match (field.modies.len(), field.modies.last()) {
 						(1, Some(modifier)) => {
 							match modifier {
-								ModPublic(_) => crate::decaf::Visibility::Pub,
-								ModPrivate(_) => crate::decaf::Visibility::Priv,
-								ModProtected(_) => crate::decaf::Visibility::Prot,
+								ModPublic(_) => {
+									curr_cls.pub_fields.borrow_mut().push(field_node);
+								}
+								ModPrivate(_) => {
+									curr_cls.priv_fields.borrow_mut().push(field_node);
+								}
+								ModProtected(_) => {
+									curr_cls.prot_fields.borrow_mut().push(field_node);
+								}
 								ModStatic(_) => panic!("static field not allowed"),
 							};
-
-							// Get current class
-							let curr_cls = self.get_curr_scope_as_class();
-
-							if curr_cls.fields.borrow().iter().any(|f| f.name == field_name) {
-								panic!("field name conflict");
-							}
-
-							println!("creating new field_node");
-							let field_node = Rc::new(crate::decaf::Field::new(field_name));
-
-							// Construct correct base type
-							match ty {
-								UnknownTy(cls_name) => {
-									match self.class_lookup(cls_name.clone()) {
-										None => {
-											// Unresolved name, add a resolution hook
-											let tmp = field_node.clone();
-											self.add_class_resolution_hook(cls_name.clone(),
-																		   Box::new(
-																			   move |cls| {
-																				   tmp.clone().set_base_type(Rc::new(
-																					   Type {
-																						   base: ClassTy(cls),
-																						   array_lvl: array_lvl,
-																					   }
-																				   ));
-																			   }));
-										},
-										Some(cls) => {
-											field_node.clone().set_base_type(Rc::new(
-												Type {
-													base: ClassTy(cls.clone()),
-													array_lvl: array_lvl,
-												}
-											));
-										}
-									}
-								},
-								BoolTy => {
-									field_node.clone().set_base_type(Rc::new(
-										Type {
-											base: BoolTy,
-											array_lvl: array_lvl,
-										}
-									));
-								},
-								IntTy => {
-									field_node.clone().set_base_type(Rc::new(
-										Type {
-											base: IntTy,
-											array_lvl: array_lvl,
-										}
-									));
-								},
-								CharTy => {
-									field_node.clone().set_base_type(Rc::new(
-										Type {
-											base: CharTy,
-											array_lvl: array_lvl,
-										}
-									));
-								},
-								VoidTy => {
-									if array_lvl != 0 {
-										panic!("void type does not allow array");
-									}
-									field_node.clone().set_base_type(Rc::new(
-										Type {
-											base: VoidTy,
-											array_lvl: 0,
-										}
-									));
-								},
-								ClassTy(cls) => {
-									field_node.clone().set_base_type(Rc::new(
-										Type {
-											base: ClassTy(cls.clone()),
-											array_lvl: array_lvl,
-										}
-									));
-								},
-								FuncTy(_) => {
-									panic!("bad field type: function");
-								},
-								MethodTy(_) => {
-									panic!("bad field type: method");
-								}
-							};
-
-							// Add new field to class
-							curr_cls.fields.borrow_mut().push(field_node.clone());
-
 						},
+						(0, None) => {
+							// Default to public fields
+							curr_cls.pub_fields.borrow_mut().push(field_node);
+						}
 						_ => {
 							return Err(InvalidModifier(field.span));
 						}
@@ -505,7 +496,123 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_method(&mut self, mthd: &lnp::past::Method) -> Self::Result {
-		Ok(BuilderResult::Normal)
+		use crate::decaf::SemanticError::*;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
+		use crate::decaf::Type;
+		use crate::decaf::TypeBase::*;
+		use crate::lnp::past::Modifier::*;
+		match self.state {
+			First => {
+				// Normalize method
+				let (return_ty, array_lvl, name, args, block) = mthd.normalize();
+
+				// Get current class
+				let curr_cls = self.get_curr_scope_as_class();
+
+				// Create method node
+				let method_node = Rc::new(crate::decaf::Method::new(name));
+				let tmp = method_node.clone();
+
+				// Get return type
+				if let Some(return_ty) = self.type_add(return_ty,
+													   array_lvl,
+													   Some(Box::new(
+														   move |cls_ty| {
+															   *tmp.clone().return_ty.borrow_mut() = Rc::new(Type {
+																   base: ClassTy(cls_ty),
+																   array_lvl: array_lvl,
+															   });
+														   }
+													   ))) {
+					*method_node.return_ty.borrow_mut() = Rc::new(return_ty);
+				}
+
+				// Get arg types
+				for (arg_name, arg_ty, arg_array_lvl) in args.into_iter() {
+					let tmp = method_node.clone();
+					let tmp_name = arg_name.clone();
+					if let Some(arg_ty) = self.type_add(arg_ty,
+														arg_array_lvl,
+														Some(Box::new(
+															move |cls_ty| {
+																tmp.set_arg_type(tmp_name.clone(), Rc::new(Type {
+																	base: ClassTy(cls_ty),
+																	array_lvl: array_lvl,
+																}));
+															}
+														))) {
+						method_node.add_arg(arg_name, Rc::new(arg_ty));
+					}
+				}
+
+				// TODO: Set block
+
+				// Check name conflict
+				if curr_cls.pub_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) {
+					panic!("method redefinition")
+				}
+
+				match (mthd.modies.len(), mthd.modies.last()) {
+					(1, Some(modifier)) => {
+						match modifier {
+							ModPublic(_) => {
+								curr_cls.pub_methods.borrow_mut().push(method_node);
+							}
+							ModPrivate(_) => {
+								curr_cls.priv_methods.borrow_mut().push(method_node);
+							}
+							ModProtected(_) => {
+								curr_cls.prot_methods.borrow_mut().push(method_node);
+							}
+							ModStatic(_) => {
+								curr_cls.pub_static_methods.borrow_mut().push(method_node);
+							}
+						};
+					},
+					(0, None) => {
+						// Default to public fields
+						curr_cls.pub_methods.borrow_mut().push(method_node);
+					},
+					(2, _) => {
+						// public/private/protected + static
+						match mthd.modies[0] {
+							ModPublic(_) => {
+								if let ModStatic(_) = mthd.modies[1] {
+									curr_cls.pub_static_methods.borrow_mut().push(method_node);
+								} else {
+									panic!("second modifer must be static");
+								}
+							},
+							ModPrivate(_) => {
+								if let ModStatic(_) = mthd.modies[1] {
+									curr_cls.priv_static_methods.borrow_mut().push(method_node);
+								} else {
+									panic!("second modifer must be static");
+								}
+							},
+							ModProtected(_) => {
+								if let ModStatic(_) = mthd.modies[1] {
+									curr_cls.prot_static_methods.borrow_mut().push(method_node);
+								} else {
+									panic!("second modifer must be static");
+								}
+							},
+							_ => {
+								panic!("first modifier must not be static (when there are two modifiers)");
+							}
+						}
+					}
+					_ => {
+						return Err(InvalidModifier(mthd.span));
+					}
+				};
+			},
+			Second => {
+				panic!("not implemented");
+			}
+		};
+		Ok(Normal)
 	}
 
 	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
