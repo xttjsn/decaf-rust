@@ -3,6 +3,7 @@ use crate::decaf;
 use crate::decaf::{Value};
 use std::rc::Rc;
 use std::collections::BTreeMap;
+use crate::lnp::past::{UnaryOp, Litr};
 
 pub trait Visitor {
 	type Result;
@@ -171,7 +172,9 @@ pub enum BuilderState {
 
 pub enum BuilderResult {
 	Normal,
-	ExprNode(decaf::Expr)
+	ExprNode(decaf::Expr),
+	VecExpr(Vec<decaf::Expr>),
+	ClassNode(Rc<decaf::Class>),
 }
 
 // trait Scope {
@@ -373,6 +376,7 @@ impl DecafTreeBuilder {
 	}
 
 	fn has_class_in_scope_stack(&self, cls: &Rc<decaf::Class>) -> bool {
+		use crate::decaf::Scope::*;
 		for scope in self.scopes.iter() {
 			match scope {
 				ClassScope(ref scls) => {
@@ -735,7 +739,7 @@ impl Visitor for DecafTreeBuilder {
 						}
 					}
 					_ => {
-						return Err(InvalidModifier(mthd.span));
+						return Err(InvalidModifier(mthd.span.clone()));
 					}
 				};
 			},
@@ -778,16 +782,17 @@ impl Visitor for DecafTreeBuilder {
 		use crate::lnp::past::Litr::*;
 		use crate::lnp::past::NAExpr::*;
 		use crate::lnp::past::NNAExpr::*;
+		use crate::lnp::past::AExpr::*;
 		use crate::decaf::TypeBase::*;
 		use crate::decaf::Scope::*;
 		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
-						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr, SelfMethodCallExpr,
-						   MethodCallExpr, SuperCallExpr, ArrayAccessExpr, FieldAccessExpr,
-						   VariableExpr};
+						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
+						   SelfMethodCallExpr, StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
+						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
 		use crate::decaf::LiteralExpr::*;
 		use crate::decaf::Expr::*;
 		let scope = self.get_curr_scope();
-		match expr.expr {
+		match &expr.expr {
 			BinaryExpr(left_expr, binop, right_expr) => {
 				match (right_expr.accept(self), left_expr.accept(self)) {
 					(Ok(rhs), Ok(lhs)) => {
@@ -800,7 +805,7 @@ impl Visitor for DecafTreeBuilder {
 						// TODO : Ord trait for Type
 						match lhs.get_type().is_compatible(rhs.get_type()) {
 							true => {
-								match binop {
+								match binop.op {
 									AssignOp => {
 										// Check if lhs is addressable
 										if lhs.addressable() {
@@ -817,7 +822,7 @@ impl Visitor for DecafTreeBuilder {
 											Ok(ExprNode(BinArith(BinArithExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
-												op: binop,
+												op: binop.op.clone(),
 											})))
 										} else {
 											Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
@@ -828,7 +833,7 @@ impl Visitor for DecafTreeBuilder {
 											Ok(ExprNode(BinLogical(BinLogicalExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
-												op: binop,
+												op: binop.op.clone(),
 											})))
 										} else {
 											Err(E_EXPR_NOT_SUPPORT_LOGICAL_OP)
@@ -839,7 +844,7 @@ impl Visitor for DecafTreeBuilder {
 											Ok(ExprNode(BinCmp(BinCmpExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
-												op: binop,
+												op: binop.op.clone(),
 											})))
 										} else {
 											Err(E_EXPR_NOT_SUPPORT_CMP_OP)
@@ -860,12 +865,12 @@ impl Visitor for DecafTreeBuilder {
 							ExprNode(rhs) => rhs,
 							_ => Err(E_EXPRNODE_NOT_FOUND)
 						};
-						match unop {
+						match unop.op {
 							PlusUOp | MinusUOp => {
 								if rhs.get_type().is_arith_type() {
 									Ok(ExprNode(UnArith(UnArithExpr {
 										rhs: Box::new(rhs),
-										op: unop,
+										op: unop.op.clone(),
 									})))
 								} else {
 									Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
@@ -885,10 +890,10 @@ impl Visitor for DecafTreeBuilder {
 					Err(e) => Err(e)
 				}
 			},
-			PrimaryExpr(prim) => {
-				match prim.prim {
+			PrimaryExpr(ref prim) => {
+				match &prim.prim {
 					NewArray(naexpr) => {
-						match naexpr.expr {
+						match &naexpr.expr {
 							NewCustom(id, dims) => {
 								match dims.accept(self) {
 									Ok(dim_expr) => {
@@ -946,99 +951,49 @@ impl Visitor for DecafTreeBuilder {
 						}
 					}
 					NonNewArray(nnaexpr) => {
-						match nnaexpr.expr {
+						match &nnaexpr.expr {
 							JustLit(litr) => {
-								match litr.litr {
+								match &litr.litr {
 									Null => Ok(ExprNode(NULL)),
-									Bool(b) => Ok(ExprNode(Literal(BoolLiteral(b)))),
-									Char(c) => Ok(ExprNode(Literal(CharLiteral(c)))),
-									Str(s) => Ok(ExprNode(Literal(StrLiteral(s)))),
+									Bool(ref b) => Ok(ExprNode(Literal(BoolLiteral(b.clone())))),
+									Char(ref c) => Ok(ExprNode(Literal(CharLiteral(c.clone())))),
+									Str(ref s) => Ok(ExprNode(Literal(StrLiteral(s.clone())))),
+									Int(ref i) => Ok(ExprNode(Literal(IntLiteral(i.clone())))),
 								}
 							}
 							JustThis => Ok(ExprNode(This)),
 							JustExpr(expr) => expr.accept(self),
 							NewObj(id, args) => {
 								if let Some(cls) = self.class_lookup(id.clone()) {
-									let arg_exprs = vec![];
-									for arg in args.iter() {
-										match arg.accept(self) {
-											Ok(arg_expr) => {
-												let arg_expr = match arg_expr {
-													ExprNode(arg_expr) => arg_expr,
-													_ => return Err(E_EXPRNODE_NOT_FOUND)
-												};
-												arg_exprs.push(arg_expr);
-											},
-											Err(e) => return Err(e)
-										}
-									}
-									// Check if signature matches with any of the constructors
-									// TODO: create a get_visible_ctors() function to tidy things up
-									match cls.get_compatible_pub_ctor(&arg_exprs) {
-										Some(ctor) => {
-											Ok(ExprNode(CreateObj(CreateObjExpr {
-												cls: cls,
-												ctor: ctor,
-												args: arg_exprs,
-											})))
-										},
-										None => {
-											let in_class_scope = self.has_class_in_scope_stack(&cls);
-											if in_class_scope {
-												match cls.get_compatible_prot_ctor(&arg_exprs) {
-													Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
-														cls: cls,
-														ctor: ctor,
-														args: arg_exprs,
-													}))),
-													None => match cls.get_compatible_priv_ctor(&arg_exprs) {
-														Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
-															cls: cls,
-															ctor: ctor,
-															args: arg_exprs,
-														}))),
-														None => Err(E_NO_COMPATIBLE_CTOR)
-													}
-												}
+									match args.accept(self) {
+										VecExpr(arg_exprs) => {
+											// Check if signature matches with any of the constructors
+											// TODO: create a get_visible_ctors() function to tide things up
+											match if self.has_class_in_scope_stack(&cls) {
+												cls.get_compatible_level0_ctor(&arg_exprs)
 											} else {
-												Err(E_NO_COMPATIBLE_CTOR)
+												cls.get_compatible_level1_ctor(&arg_exprs)
+											} {
+												Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
+													cls: cls,
+													ctor: ctor,
+													args: arg_exprs,
+												}))),
+												None => Err(E_NO_COMPATIBLE_CTOR),
 											}
 										}
+										_ => Err(E_VEC_EXPR_NOT_FOUND)
 									}
 								} else {
 									Err(E_CLASS_NOT_DEFINED)
 								}
 							}
 							CallSelfMethod(id, args) => {
-								let arg_exprs = vec![];
-								for arg in args.iter() {
-									match arg.accept(self) {
-										Ok(arg_expr) => {
-											let arg_expr = match arg_expr {
-												ExprNode(arg_expr) => arg_expr,
-												_ => return Err(E_EXPRNODE_NOT_FOUND)
-											};
-											arg_exprs.push(arg_expr);
-										},
-										Err(e) => return Err(e)
-									}
-								}
-
-								// Lookup the method
-								let mlookup = |cls| {
-									match cls.get_compatible_pub_method(&arg_exprs) {
-										Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
-											cls: cls,
-											method: method,
-											args: arg_exprs,
-										}))),
-										None => match cls.get_compatible_prot_method(&arg_exprs) {
-											Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
-												cls: cls,
-												method: method,
-												args: arg_exprs,
-											}))),
-											None => match cls.get_compatible_priv_method(&arg_exprs) {
+								match args.accept(self) {
+									VecExpr(arg_exprs) => {
+										// Lookup the method
+										let mlookup = |cls| {
+											match cls.get_compatible_level0_method(&arg_exprs) {
 												Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
 													cls: cls,
 													method: method,
@@ -1046,25 +1001,111 @@ impl Visitor for DecafTreeBuilder {
 												}))),
 												None => Err(E_NO_COMPATIBLE_METHOD)
 											}
+										};
+										match self.scopes.iter().rev().find(|scope| {
+											match scope {
+												ClassScope(cls) => if let Ok(expr_node) = mlookup(cls.clone()) {
+													Some(expr_node);
+												} else {
+													None
+												}
+												_ => None
+											}
+										}) {
+											Some(expr) => expr,
+											None => Err(E_NO_COMPATIBLE_METHOD)
 										}
 									}
+									_ => Err(E_VEC_EXPR_NOT_FOUND)
 								}
-								for scope in self.scopes.iter().rev() {
-									match scope {
-										ClassScope(cls) => if let Ok(expr_node) = mlookup(cls.clone()) {
-											return Ok(expr_node);
-										} else {
-											continue;
-										}
-									}
-								}
-								Err(E_NO_COMPATIBLE_METHOD)
 							}
 							CallMethod(nprim, id, args) => {
-
+								match args.accept(self) {
+									VecExpr(arg_exprs) => {
+										match nprim.accept(self) {
+											ExprNode(prim_expr) => {
+												let prim_ty = prim_expr.get_type();
+												if let ClassTy(cls) = prim_ty.base {
+													if prim_ty.array_lvl == 0 {
+														// Lookup method
+														match if self.has_class_in_scope_stack(&cls) {
+															cls.get_compatible_level0_method(&arg_exprs)
+														} else {
+															cls.get_compatible_level1_method(&arg_exprs)
+														} {
+															Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
+																cls: cls,
+																prim: prim_expr,
+																method: method,
+																args: arg_exprs
+															}))),
+															None => Err(E_NO_COMPATIBLE_METHOD)
+														}
+													} else {
+														Err(E_ARRAY_TYPE_NOT_SUPPORT_METHOD_CALL)
+													}
+												} else {
+													Err(E_NON_CLASS_TYPE_NOT_SUPPORT_METHOD_CALL)
+												}
+											},
+											ClassNode(cls) => {
+												// This is a static method call
+												match if self.has_class_in_scope_stack(&cls) {
+													cls.get_compatible_level0_static_method(&arg_exprs)
+												} else {
+													cls.get_compatible_level1_static_method(&arg_exprs)
+												} {
+													Some(method) => Ok(ExprNode(StaticMethodCall(StaticMethodCallExpr {
+														cls: cls,
+														method: method,
+														args: arg_exprs
+													}))),
+													None => Err(E_NO_COMPATIBLE_METHOD)
+												}
+											}
+											_ => Err(E_EXPR_NODE_NOT_FOUND)
+										}
+									}
+									_ => Err(E_VEC_EXPR_NOT_FOUND)
+								}
 							}
-							CallSuper(id, args) => {}
-							EvalArray(arrexpr) => {}
+							CallSuper(id, args) => {
+								match args.accept(self) {
+									VecExpr(arg_exprs) => {
+										// NOTE: make it recursive if we support nested class
+										match self.get_last_class_scope_as_class() {
+											Some(cls) => {
+												match cls.get_compatible_super_level0_method_and_super(&arg_exprs) {
+													Some((method, sup)) => Ok(ExprNode(SuperCall(SuperCallExpr {
+														cls: cls,
+														sup: sup,
+														method: method,
+														args: arg_exprs,
+													}))),
+													None => Err(E_NO_COMPATIBLE_METHOD)
+												}
+											}
+											None => Err(E_SUPER_CALL_WITHOUT_CLASS)
+										}
+									}
+								}
+							}
+							EvalArray(arrexpr) => {
+								match &arrexpr.expr {
+									SimpleArraryExpr(id, dim) => {
+										// Lookup id, must have array_lvl
+										match self.variable_lookup(id) {
+											Some(inst) => {
+												let ty = inst.get_type();
+												
+											}
+										}
+									}
+									ComplexArrayExpr(nna, dim) => {
+
+									}
+								}
+							}
 							EvalField(fldexpr) => {}
 						}
 					}

@@ -149,6 +149,7 @@ pub enum Expr {
 	CreateObj(CreateObjExpr),
 	SelfMethodCall(SelfMethodCallExpr),
 	MethodCall(MethodCallExpr),
+	StaticMethodCall(StaticMethodCallExpr),
 	SuperCall(SuperCallExpr),
 	ArrayAccess(ArrayAccessExpr),
 	FieldAccess(FieldAccessExpr),
@@ -172,6 +173,7 @@ impl Value for Expr {
 			NULL => false,
 			CreateObj(_) => false,
 			SelfMethodCall(_) => false,
+			StaticMethodCall(_) => false,
 			MethodCall(_) => false,
 			SuperCall(_) => false,
 			ArrayAccess(_) => true,
@@ -214,6 +216,9 @@ pub struct BinLogicalExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BinCmpExpr {
+	lhs: Box<Expr>,
+	rhs: Box<Expr>,
+	op: BinOp,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -246,10 +251,25 @@ pub struct SelfMethodCallExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct MethodCallExpr {
+	cls: Rc<Class>,
+	prim: Expr,
+	method: Rc<Method>,
+	args: Vec<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct StaticMethodCallExpr {
+	cls: Rc<Class>,
+	method: Rc<Method>,
+	args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SuperCallExpr {
+	cls: Rc<Class>,
+	sup: Rc<Class>,
+	method: Rc<Method>,
+	args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
