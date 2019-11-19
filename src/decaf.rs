@@ -4,6 +4,7 @@ use std::fmt;
 use std::collections::BTreeSet;
 use std::cell::RefCell;
 use crate::lnp;
+use crate::lnp::past::{BinOp, UnOp, Litr};
 
 pub enum SemanticError{
 	ClassRedefinition(String),
@@ -50,19 +51,26 @@ pub enum TypeBase {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Method {
 	pub name: String,
+	pub cls: RefCell<Rc<Class>>,
+	pub vis: RefCell<Visibility>,
+	pub stat: RefCell<bool>,
 	pub return_ty: RefCell<Rc<Type>>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 }
 
 impl Method {
 
-	pub fn new(name: String) -> Self {
+	pub fn new(name: String, cls: Rc<Class>) -> Self {
+		let unknowncls = Rc::new(Type {
+			base: TypeBase::UnknownTy("Unknown".to_string()),
+			array_lvl: 0,
+		});
 		Method {
 			name: name,
-			return_ty: RefCell::new(Rc::new(Type {
-				base: TypeBase::UnknownTy("Unknown".to_string()),
-				array_lvl: 0,
-			})),
+			cls: RefCell::new(cls),
+			vis: RefCell::new(Visibility::Pub),
+			stat: RefCell::new(false),
+			return_ty: RefCell::new(unknowncls.clone()),
 			args: RefCell::new(vec![]),
 		}
 	}
@@ -120,12 +128,140 @@ pub struct Ctor {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Block {
+}
 
+pub trait Value {
+	fn addressable(&self) -> bool;
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Expr {
+pub enum Expr {
+	Assign(AssignExpr),
+	BinArith(BinArithExpr),
+	UnArith(UnArithExpr),
+	BinLogical(BinLogicalExpr),
+	UnNot(UnNotExpr),
+	BinCmp(BinCmpExpr),
+	CreateArray(CreateArrayExpr),
+	Literal(LiteralExpr),
+	This,
+	NULL,
+	CreateObj(CreateObjExpr),
+	SelfMethodCall(SelfMethodCallExpr),
+	MethodCall(MethodCallExpr),
+	SuperCall(SuperCallExpr),
+	ArrayAccess(ArrayAccessExpr),
+	FieldAccess(FieldAccessExpr),
+	Variable(VariableExpr),
+}
 
+impl Value for Expr {
+	fn addressable(&self) -> bool {
+		use Expr::*;
+		// only a tentative implementation
+		match self {
+			Assign(_) => false,
+			BinArith(_) => false,
+			UnArith(_) => false,
+			BinLogical(_) => false,
+			UnNot(_) => false,
+			BinCmp(_) => false,
+			CreateArray(_) => false,
+			Literal(_) => false,
+			This => true,
+			NULL => false,
+			CreateObj(_) => false,
+			SelfMethodCall(_) => false,
+			MethodCall(_) => false,
+			SuperCall(_) => false,
+			ArrayAccess(_) => true,
+			FieldAccess(_)=> true,
+			Variable(_) => true,
+		}
+	}
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct AssignExpr {
+	lhs: Box<Expr>,
+	rhs: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct BinArithExpr {
+	lhs: Box<Expr>,
+	rhs: Box<Expr>,
+	op: BinOp,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct UnArithExpr {
+	rhs: Box<Expr>,
+	op: UnOp,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct UnNotExpr {
+	rhs: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct BinLogicalExpr {
+	lhs: Box<Expr>,
+	rhs: Box<Expr>,
+	op: BinOp,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct BinCmpExpr {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct CreateArrayExpr {
+	ty: TypeBase,
+	array_lvl_expr: Box<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum LiteralExpr {
+	IntLiteral(i32),
+	BoolLiteral(bool),
+	CharLiteral(char),
+	StrLiteral(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct CreateObjExpr {
+	cls: Rc<Class>,
+	ctor: Rc<Ctor>,
+	args: Vec<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct SelfMethodCallExpr {
+	cls: Rc<Class>,
+	method: Rc<Method>,
+	args: Vec<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct MethodCallExpr {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct SuperCallExpr {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ArrayAccessExpr {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FieldAccessExpr {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct VariableExpr {
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -246,7 +382,7 @@ impl Class {
 	pub fn set_super(self: Rc<Class>, supr: Rc<Class>) {
 		// supr must be a resolved class
 		match *supr.sup.borrow() {
-			None if supr.name != "Object" => panic!("Super class is not resolved"),
+			None if supr.name != "Object" => panic!("Super class {} is not resolved", supr.name),
 			_ => {}
 		}
 
@@ -268,10 +404,89 @@ impl Class {
 		*self.pub_methods.borrow_mut() = pub_methods;
 
 		// Inherit protected methods
-		for supr_prot_method in supr.pub_methods.borrow().iter() {
+		for supr_prot_method in supr.prot_methods.borrow().iter() {
 			self.check_prot_method_defined_as_nonprot(supr_prot_method).unwrap();
 		}
 		let prot_methods = prepend(&self.prot_methods.borrow()[..], &supr.prot_methods.borrow()[..]);
 		*self.prot_methods.borrow_mut() = prot_methods;
 	}
+
+	pub fn get_field_by_name(&self, name: &String) -> Option<Rc<Field>> {
+		for field in self.pub_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		for field in self.priv_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		for field in self.prot_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		None
+	}
+
+	pub fn get_method_by_signature(&self, return_ty: &TypeBase, array_lvl: u32,
+								   args: &Vec<(String, TypeBase, u32)>, is_static: bool) -> Option<Rc<Method>> {
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				if method.return_ty.borrow().base != *return_ty ||
+					method.return_ty.borrow().array_lvl != array_lvl {
+						continue;
+					}
+
+				for (arga, argb) in method.args.borrow().iter().zip(args.iter()) {
+					if arga.0 != argb.0 || arga.1.base != argb.1 || arga.1.array_lvl != argb.2 {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+		if is_static {
+			match go(&self.pub_static_methods.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.prot_static_methods.borrow()) {
+					Some(m) => Some(m),
+					None => match go(&self.priv_static_methods.borrow()) {
+						Some(m) => Some(m),
+						None => None
+					}
+				}
+			}
+		} else {
+			match go(&self.pub_methods.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.prot_methods.borrow()) {
+					Some(m) => Some(m),
+					None => match go(&self.priv_methods.borrow()) {
+						Some(m) => Some(m),
+						None => None,
+					}
+				}
+			}
+		}
+	}
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expression {
+	Binary(Box<Expression>, BinOp, Box<Expression>),
+	Unary(UnOp, Box<Expression>),
+	NewClassArray(Rc<Class>, Vec<Expression>),
+	NewPrimitive(Primitive, Vec<Expression>),
+	Literal(Litr),
+	This,
+	NewObject(Rc<Class>, Vec<Expression>),
+	MethodCall(Rc<ClassInst>, Vec<Expression>),
+	SuperCall(Rc<ClassInst>, Vec<Expression>),
+
 }

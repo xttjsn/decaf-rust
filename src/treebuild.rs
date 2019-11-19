@@ -1,5 +1,6 @@
 use crate::lnp;
 use crate::decaf;
+use crate::decaf::{Value};
 use std::rc::Rc;
 use std::collections::BTreeMap;
 
@@ -70,6 +71,18 @@ impl Visitable for lnp::past::Method {
 impl Visitable for lnp::past::Ctor {
 	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result {
 		visitor.visit_ctor(self)
+	}
+}
+
+impl Visitable for lnp::past::Block {
+	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result {
+		visitor.visit_block(self)
+	}
+}
+
+impl Visitable for lnp::past::Expression {
+	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result {
+		visitor.visit_expr(self)
 	}
 }
 
@@ -158,6 +171,7 @@ pub enum BuilderState {
 
 pub enum BuilderResult {
 	Normal,
+	ExprNode(decaf::Expr)
 }
 
 // trait Scope {
@@ -358,6 +372,20 @@ impl DecafTreeBuilder {
 		}
 	}
 
+	fn has_class_in_scope_stack(&self, cls: &Rc<decaf::Class>) -> bool {
+		for scope in self.scopes.iter() {
+			match scope {
+				ClassScope(ref scls) => {
+					if scls == cls {
+						return true;
+					}
+				},
+				_ => continue
+			}
+		}
+		false
+	}
+
 	fn load_builtin(&mut self) {
 		// TODO: load built-in classes: Object, String and IO
 		self.class_map.insert("Object".to_string(), Rc::new(decaf::Class::new("Object".to_string())));
@@ -375,28 +403,34 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_program(&mut self, prog: &lnp::past::Program) -> Self::Result {
 		self.load_builtin();
 
-		// Two pass to resolve all symbols
+		// First pass to collect class list
 		self.state = BuilderState::First;
 		for cls in prog.classes.iter() {
 			cls.accept(self)?;
 		}
 
+		// Second pass to start parsing
+		// self.state = BuilderState::Second;
+		// for cls in prog.classes.iter() {
+		// 	cls.accept(self)?;
+		// }
+
 		Ok(BuilderResult::Normal)
 	}
 
-	fn visit_class(&mut self, cls: &lnp::past::ClassNode) -> Self::Result {
+	fn visit_class(&mut self, cls_node: &lnp::past::ClassNode) -> Self::Result {
 		use crate::decaf::SemanticError::*;
 		match self.state {
 			BuilderState::First => {
 				// Check for class name conflicts
-				if let Some(_) = self.class_lookup(cls.name.clone()) {
-					return Err(ClassRedefinition(cls.name.clone()));
+				if let Some(_) = self.class_lookup(cls_node.name.clone()) {
+					return Err(ClassRedefinition(cls_node.name.clone()));
 				} else {
 					// Create new class type
-					let new_class = Rc::new(decaf::Class::new(cls.name.clone()));
+					let new_class = Rc::new(decaf::Class::new(cls_node.name.clone()));
 
 					// Try to get the super type
-					match &cls.sup {
+					match &cls_node.sup {
 						None => {
 							// Inherits from Object class
 							new_class.clone().set_super(self.class_lookup("Object".to_string()).unwrap());
@@ -414,20 +448,37 @@ impl Visitor for DecafTreeBuilder {
 																		   Some(tmp.clone())
 																	   }));
 								},
-								Some(supcls) => {
-									new_class.clone().set_super(supcls.clone());
+								Some(supcls_node) => {
+									// Set super if super class is resolved
+									match *supcls_node.sup.borrow() {
+										Some(_) => {
+											new_class.clone().set_super(supcls_node.clone());
+										},
+										None => {
+											// Otherwise register hook
+											let tmp = new_class.clone();
+											self.add_class_resolution_hook(supnode.name.clone(),
+																		   Box::new(
+																			   move |cls| {
+																				   tmp.clone().set_super(cls);
+																				   Some(tmp.clone())
+																			   }
+																		   ));
+										}
+									}
+
 								}
 							}
 						}
 					}
 
 					// Add the type to the current class_list
-					self.class_add(cls.name.clone(), new_class.clone());
+					self.class_add(cls_node.name.clone(), new_class.clone());
 
 					self.scopes.push(decaf::Scope::ClassScope(new_class.clone()));
 
 					println!("trying to visit class member");
-					for member in cls.member_list.iter() {
+					for member in cls_node.member_list.iter() {
 						match member {
 							lnp::past::Member::FieldMember(field) => field.accept(self)?,
 							lnp::past::Member::MethodMember(method) => method.accept(self)?,
@@ -447,21 +498,43 @@ impl Visitor for DecafTreeBuilder {
 				}
 			}
 			BuilderState::Second => {
-				panic!("not implemented")
+				use crate::decaf::Scope::*;
+				use BuilderResult::*;
+				// get decaf class node
+				if let Some(cls) = self.class_lookup(cls_node.name.clone()) {
+					self.scopes.push(ClassScope(cls.clone()));
+
+					for member in cls_node.member_list.iter() {
+						match member {
+							lnp::past::Member::FieldMember(field) => field.accept(self)?,
+							lnp::past::Member::MethodMember(method) => method.accept(self)?,
+							lnp::past::Member::CtorMember(ctor) => ctor.accept(self)?,
+						};
+					}
+
+					self.scopes.pop();
+
+					Ok(Normal)
+				} else {
+					panic!("class not defined in the first pass")
+				}
+				// visit each method
 			}
 		}
 	}
 
-	fn visit_field(&mut self, field: &lnp::past::Field) -> Self::Result {
+	fn visit_field(&mut self, field_node: &lnp::past::Field) -> Self::Result {
 		use crate::decaf::SemanticError::*;
 		use crate::decaf::Type;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
 		use crate::decaf::TypeBase::*;
 		use crate::lnp::past::Modifier::*;
 
 		match &self.state {
-			BuilderState::First => {
+			First => {
 				// Normalize field
-				for norm_field in field.normalize() {
+				for norm_field in field_node.normalize() {
 					let (ty, array_lvl, field_name, init_expr) = norm_field;
 
 					// Get current class
@@ -475,8 +548,8 @@ impl Visitor for DecafTreeBuilder {
 						}
 
 					// Create field node
-					let field_node = Rc::new(crate::decaf::Field::new(field_name));
-					let tmp = field_node.clone();
+					let field = Rc::new(crate::decaf::Field::new(field_name));
+					let tmp = field.clone();
 
 					// First check if we have change to reuse type
 					if let Some(field_type) = self.type_add(ty,
@@ -490,38 +563,49 @@ impl Visitor for DecafTreeBuilder {
 														   None
 													   }
 												   ))) {
-						field_node.set_base_type(Rc::new(field_type));
+						field.set_base_type(Rc::new(field_type));
 					}
 
 					// Only allow 0/1 modifier and if it's pub/prot/priv
-					match (field.modies.len(), field.modies.last()) {
+					match (field_node.modies.len(), field_node.modies.last()) {
 						(1, Some(modifier)) => {
 							match modifier {
 								ModPublic(_) => {
-									curr_cls.pub_fields.borrow_mut().push(field_node);
+									curr_cls.pub_fields.borrow_mut().push(field);
 								}
 								ModPrivate(_) => {
-									curr_cls.priv_fields.borrow_mut().push(field_node);
+									curr_cls.priv_fields.borrow_mut().push(field);
 								}
 								ModProtected(_) => {
-									curr_cls.prot_fields.borrow_mut().push(field_node);
+									curr_cls.prot_fields.borrow_mut().push(field);
 								}
 								ModStatic(_) => panic!("static field not allowed"),
 							};
 						},
 						(0, None) => {
 							// Default to public fields
-							curr_cls.pub_fields.borrow_mut().push(field_node);
+							curr_cls.pub_fields.borrow_mut().push(field);
 						}
 						_ => {
-							return Err(InvalidModifier(field.span));
+							return Err(InvalidModifier(field_node.span));
 						}
 					};
 				}
 				Ok(BuilderResult::Normal)
 			},
-			BuilderState::Second => {
-				panic!("not implemented")
+			Second => {
+				// Get current class
+				let cls = self.get_curr_scope_as_class();
+
+				// Visit the expression if there's any
+				for norm_field in field_node.normalize() {
+					let (ty, array_lvl, field_name, init_expr) = norm_field;
+					let field = cls.get_field_by_name(&field_name).unwrap();
+					if let Some(init_expr) = init_expr {
+						init_expr.accept(self)?;
+					}
+				}
+				Ok(Normal)
 			}
 		}
 	}
@@ -533,6 +617,8 @@ impl Visitor for DecafTreeBuilder {
 		use crate::decaf::Type;
 		use crate::decaf::TypeBase::*;
 		use crate::lnp::past::Modifier::*;
+		use crate::decaf::Visibility::*;
+		use crate::decaf::Scope::*;
 		match self.state {
 			First => {
 				// Normalize method
@@ -542,7 +628,7 @@ impl Visitor for DecafTreeBuilder {
 				let curr_cls = self.get_curr_scope_as_class();
 
 				// Create method node
-				let method_node = Rc::new(crate::decaf::Method::new(name));
+				let method_node = Rc::new(crate::decaf::Method::new(name, curr_cls.clone()));
 				let tmp = method_node.clone();
 
 				// Get return type
@@ -590,21 +676,27 @@ impl Visitor for DecafTreeBuilder {
 					(1, Some(modifier)) => {
 						match modifier {
 							ModPublic(_) => {
+								*method_node.vis.borrow_mut() = Pub;
 								curr_cls.pub_methods.borrow_mut().push(method_node);
 							}
 							ModPrivate(_) => {
+								*method_node.vis.borrow_mut() = Priv;
 								curr_cls.priv_methods.borrow_mut().push(method_node);
 							}
 							ModProtected(_) => {
+								*method_node.vis.borrow_mut() = Prot;
 								curr_cls.prot_methods.borrow_mut().push(method_node);
 							}
 							ModStatic(_) => {
+								*method_node.vis.borrow_mut() = Pub;
+								*method_node.stat.borrow_mut() = true;
 								curr_cls.pub_static_methods.borrow_mut().push(method_node);
 							}
 						};
 					},
 					(0, None) => {
 						// Default to public fields
+						*method_node.vis.borrow_mut() = Pub;
 						curr_cls.pub_methods.borrow_mut().push(method_node);
 					},
 					(2, _) => {
@@ -612,6 +704,8 @@ impl Visitor for DecafTreeBuilder {
 						match mthd.modies[0] {
 							ModPublic(_) => {
 								if let ModStatic(_) = mthd.modies[1] {
+									*method_node.vis.borrow_mut() = Pub;
+									*method_node.stat.borrow_mut() = true;
 									curr_cls.pub_static_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
@@ -619,6 +713,8 @@ impl Visitor for DecafTreeBuilder {
 							},
 							ModPrivate(_) => {
 								if let ModStatic(_) = mthd.modies[1] {
+									*method_node.vis.borrow_mut() = Priv;
+									*method_node.stat.borrow_mut() = true;
 									curr_cls.priv_static_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
@@ -626,6 +722,8 @@ impl Visitor for DecafTreeBuilder {
 							},
 							ModProtected(_) => {
 								if let ModStatic(_) = mthd.modies[1] {
+									*method_node.vis.borrow_mut() = Prot;
+									*method_node.stat.borrow_mut() = true;
 									curr_cls.prot_static_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
@@ -642,14 +740,348 @@ impl Visitor for DecafTreeBuilder {
 				};
 			},
 			Second => {
-				panic!("not implemented");
+				// Get current class
+				let cls = self.get_curr_scope_as_class();
+
+				// Normalize method
+				let (return_ty, array_lvl, name, args, block) = mthd.normalize();
+				let is_static = mthd.modies.iter().any(|x| {
+					if let ModStatic(_) = x {
+						true
+					} else {
+						false
+					}
+				});
+
+				// Get current method
+				let method = cls.get_method_by_signature(&return_ty, array_lvl, &args, is_static).unwrap();
+
+				// Push new scope
+				self.scopes.push(MethodScope(method));
+
+				// Visit block
+				mthd.block.accept(self)?;
 			}
 		};
 		Ok(Normal)
 	}
 
-	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
+	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result {
+		use crate::decaf::SemanticError::*;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
+		use crate::lnp::past::Expr::*;
+		use crate::lnp::past::BinOp::*;
+		use crate::lnp::past::UnOp::*;
+		use crate::lnp::past::Prim::*;
+		use crate::lnp::past::PrimitiveType::*;
+		use crate::lnp::past::Litr::*;
+		use crate::lnp::past::NAExpr::*;
+		use crate::lnp::past::NNAExpr::*;
+		use crate::decaf::TypeBase::*;
+		use crate::decaf::Scope::*;
+		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
+						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr, SelfMethodCallExpr,
+						   MethodCallExpr, SuperCallExpr, ArrayAccessExpr, FieldAccessExpr,
+						   VariableExpr};
+		use crate::decaf::LiteralExpr::*;
+		use crate::decaf::Expr::*;
+		let scope = self.get_curr_scope();
+		match expr.expr {
+			BinaryExpr(left_expr, binop, right_expr) => {
+				match (right_expr.accept(self), left_expr.accept(self)) {
+					(Ok(rhs), Ok(lhs)) => {
+						let (lhs, rhs) = {
+							match (lhs, rhs) {
+								(ExprNode(lhs), ExprNode(rhs)) => (lhs, rhs),
+								_ => return Err(E_EXPRNODE_NOT_FOUND)
+							}
+						};
+						// TODO : Ord trait for Type
+						match lhs.get_type().is_compatible(rhs.get_type()) {
+							true => {
+								match binop {
+									AssignOp => {
+										// Check if lhs is addressable
+										if lhs.addressable() {
+											Ok(ExprNode(Assign(AssignExpr {
+												lhs: Box::new(lhs),
+												rhs: Box::new(rhs),
+											})))
+										} else {
+											Err(E_LHS_NOT_ADDRESSABLE)
+										}
+									}
+									PlusOp | MinusOp | TimesOp | DivideOp | ModOp => {
+										if lhs.get_type().is_arith_type() {
+											Ok(ExprNode(BinArith(BinArithExpr {
+												lhs: Box::new(lhs),
+												rhs: Box::new(rhs),
+												op: binop,
+											})))
+										} else {
+											Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
+										}
+									}
+									LogicalOrOp | LogicalAndOp | EqualsOp | NotEqualsOp => {
+										if lhs.get_type().is_logical_type() {
+											Ok(ExprNode(BinLogical(BinLogicalExpr {
+												lhs: Box::new(lhs),
+												rhs: Box::new(rhs),
+												op: binop,
+											})))
+										} else {
+											Err(E_EXPR_NOT_SUPPORT_LOGICAL_OP)
+										}
+									}
+									_ => {
+										if lhs.get_type().is_cmp_type() {
+											Ok(ExprNode(BinCmp(BinCmpExpr {
+												lhs: Box::new(lhs),
+												rhs: Box::new(rhs),
+												op: binop,
+											})))
+										} else {
+											Err(E_EXPR_NOT_SUPPORT_CMP_OP)
+										}
+									}
+								}
+							}
+							false => Err(E_EXPR_NOT_COMPATIBLE_TYPE)
+						}
+					}
+					(Err(e), _) | (_, Err(e))=> Err(e)
+				}
+			},
+			UnaryExpr(unop, right_expr) => {
+				match right_expr.accept(self) {
+					Ok(rhs) => {
+						let rhs = match rhs {
+							ExprNode(rhs) => rhs,
+							_ => Err(E_EXPRNODE_NOT_FOUND)
+						};
+						match unop {
+							PlusUOp | MinusUOp => {
+								if rhs.get_type().is_arith_type() {
+									Ok(ExprNode(UnArith(UnArithExpr {
+										rhs: Box::new(rhs),
+										op: unop,
+									})))
+								} else {
+									Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
+								}
+							}
+							NotUOp => {
+								if rhs.get_type().is_logical_type() {
+									Ok(ExprNode(UnNot(UnNotExpr {
+										rhs: Box::new(rhs)
+									})))
+								} else {
+									Err(E_EXPR_NOT_SUPPORT_LOGICAL_OP)
+								}
+							}
+						}
+					}
+					Err(e) => Err(e)
+				}
+			},
+			PrimaryExpr(prim) => {
+				match prim.prim {
+					NewArray(naexpr) => {
+						match naexpr.expr {
+							NewCustom(id, dims) => {
+								match dims.accept(self) {
+									Ok(dim_expr) => {
+										let dim_expr = match dim_expr {
+											ExprNode(dim_expr) => dim_expr,
+											_ => Err(E_EXPRNODE_NOT_FOUND),
+										};
+										if dim_expr.get_type().is_arith_type() {
+											// lookup class for id
+											if let Some(cls) = self.class_lookup(id.clone()) {
+												Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: ClassTy(cls),
+													array_lvl_expr: Box::new(dim_expr),
+												})))
+											} else {
+												Err(E_CLASS_NOT_DEFINED)
+											}
+										} else {
+											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+										}
+									}
+									Err(e) => Err(e)
+								}
+							}
+							NewPrimitive(primtype, dims) => {
+								match dims.accept(self) {
+									Ok(dim_expr) => {
+										let dim_expr = match dim_expr {
+											ExprNode(dim_expr) => dim_expr,
+											_ => Err(E_EXPRNODE_NOT_FOUND),
+										};
+										if dim_expr.get_type().is_arith_type() {
+											match primtype {
+												BoolType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: BoolTy,
+													array_lvl_expr: Box::new(dim_expr),
+												}))),
+												IntType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: IntTy,
+													array_lvl_expr: Box::new(dim_expr),
+												}))),
+												CharType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: CharTy,
+													array_lvl_expr: Box::new(dim_expr),
+												}))),
+												VoidType(_) => Err(E_VOID_ARRAY)
+											}
+										} else {
+											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+										}
+									}
+									Err(e) => Err(e)
+								}
+							}
+						}
+					}
+					NonNewArray(nnaexpr) => {
+						match nnaexpr.expr {
+							JustLit(litr) => {
+								match litr.litr {
+									Null => Ok(ExprNode(NULL)),
+									Bool(b) => Ok(ExprNode(Literal(BoolLiteral(b)))),
+									Char(c) => Ok(ExprNode(Literal(CharLiteral(c)))),
+									Str(s) => Ok(ExprNode(Literal(StrLiteral(s)))),
+								}
+							}
+							JustThis => Ok(ExprNode(This)),
+							JustExpr(expr) => expr.accept(self),
+							NewObj(id, args) => {
+								if let Some(cls) = self.class_lookup(id.clone()) {
+									let arg_exprs = vec![];
+									for arg in args.iter() {
+										match arg.accept(self) {
+											Ok(arg_expr) => {
+												let arg_expr = match arg_expr {
+													ExprNode(arg_expr) => arg_expr,
+													_ => return Err(E_EXPRNODE_NOT_FOUND)
+												};
+												arg_exprs.push(arg_expr);
+											},
+											Err(e) => return Err(e)
+										}
+									}
+									// Check if signature matches with any of the constructors
+									// TODO: create a get_visible_ctors() function to tidy things up
+									match cls.get_compatible_pub_ctor(&arg_exprs) {
+										Some(ctor) => {
+											Ok(ExprNode(CreateObj(CreateObjExpr {
+												cls: cls,
+												ctor: ctor,
+												args: arg_exprs,
+											})))
+										},
+										None => {
+											let in_class_scope = self.has_class_in_scope_stack(&cls);
+											if in_class_scope {
+												match cls.get_compatible_prot_ctor(&arg_exprs) {
+													Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
+														cls: cls,
+														ctor: ctor,
+														args: arg_exprs,
+													}))),
+													None => match cls.get_compatible_priv_ctor(&arg_exprs) {
+														Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
+															cls: cls,
+															ctor: ctor,
+															args: arg_exprs,
+														}))),
+														None => Err(E_NO_COMPATIBLE_CTOR)
+													}
+												}
+											} else {
+												Err(E_NO_COMPATIBLE_CTOR)
+											}
+										}
+									}
+								} else {
+									Err(E_CLASS_NOT_DEFINED)
+								}
+							}
+							CallSelfMethod(id, args) => {
+								let arg_exprs = vec![];
+								for arg in args.iter() {
+									match arg.accept(self) {
+										Ok(arg_expr) => {
+											let arg_expr = match arg_expr {
+												ExprNode(arg_expr) => arg_expr,
+												_ => return Err(E_EXPRNODE_NOT_FOUND)
+											};
+											arg_exprs.push(arg_expr);
+										},
+										Err(e) => return Err(e)
+									}
+								}
 
+								// Lookup the method
+								let mlookup = |cls| {
+									match cls.get_compatible_pub_method(&arg_exprs) {
+										Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
+											cls: cls,
+											method: method,
+											args: arg_exprs,
+										}))),
+										None => match cls.get_compatible_prot_method(&arg_exprs) {
+											Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
+												cls: cls,
+												method: method,
+												args: arg_exprs,
+											}))),
+											None => match cls.get_compatible_priv_method(&arg_exprs) {
+												Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
+													cls: cls,
+													method: method,
+													args: arg_exprs,
+												}))),
+												None => Err(E_NO_COMPATIBLE_METHOD)
+											}
+										}
+									}
+								}
+								for scope in self.scopes.iter().rev() {
+									match scope {
+										ClassScope(cls) => if let Ok(expr_node) = mlookup(cls.clone()) {
+											return Ok(expr_node);
+										} else {
+											continue;
+										}
+									}
+								}
+								Err(E_NO_COMPATIBLE_METHOD)
+							}
+							CallMethod(nprim, id, args) => {
+
+							}
+							CallSuper(id, args) => {}
+							EvalArray(arrexpr) => {}
+							EvalField(fldexpr) => {}
+						}
+					}
+					Identifier(id) => {
+
+					}
+				}
+			}
+		}
+		Ok(BuilderResult::Normal)
+	}
+
+	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
+		Ok(BuilderResult::Normal)
+	}
+
+	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
 		Ok(BuilderResult::Normal)
 	}
 
@@ -662,14 +1094,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_vardecl(&mut self, vardecl: &lnp::past::VarDeclarator) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-
-	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-
-	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
 		Ok(BuilderResult::Normal)
 	}
 

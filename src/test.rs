@@ -146,4 +146,134 @@ class Foo {
 			}
 		}
 	}
+
+	#[test]
+	fn test_mixed_order_declaration() {
+		let mut builder = DecafTreeBuilder::new();
+
+		let program_str = r#"
+class Bar extends Foo {
+	public int y;
+}
+class Woo extends Bar {
+	public int z;
+}
+class Foo {
+	public int x;
+}
+"#;
+		let program = lnp::parse_decaf(program_str);
+		assert_eq!(program.classes.len(), 3);
+		builder.visit_program(&program);
+
+		match builder.class_map.get(&"Woo".to_string()) {
+			None => assert_eq!(1, 0),
+			Some(woo) => {
+				assert_eq!(woo.name, "Woo");
+				assert_eq!(woo.sup.borrow().as_ref().unwrap().name, "Bar");
+				assert_eq!(woo.pub_fields.borrow().len(), 3);
+				assert_eq!(woo.pub_fields.borrow()[0].name, "x");
+				assert_eq!(woo.pub_fields.borrow()[1].name, "y");
+				assert_eq!(woo.pub_fields.borrow()[2].name, "z");
+			}
+		}
+	}
+
+
+	#[test]
+	fn test_methods_simple_inheritance() {
+		let mut builder = DecafTreeBuilder::new();
+
+		let program_str = r#"
+class Bar extends Foo {
+	public int methodB() {}
+}
+class Foo {
+	public int methodA() {}
+}
+"#;
+		let program = lnp::parse_decaf(program_str);
+		assert_eq!(program.classes.len(), 2);
+		builder.visit_program(&program);
+
+		match builder.class_map.get(&"Bar".to_string()) {
+			None => assert_eq!(1, 0),
+			Some(woo) => {
+				assert_eq!(woo.name, "Bar");
+				assert_eq!(woo.sup.borrow().as_ref().unwrap().name, "Foo");
+				assert_eq!(woo.pub_methods.borrow().len(), 2);
+				assert_eq!(woo.pub_methods.borrow()[0].name, "methodA");
+				assert_eq!(woo.pub_methods.borrow()[1].name, "methodB");
+			}
+		}
+	}
+
+	#[test]
+	fn test_methods_overwrite() {
+		let mut builder = DecafTreeBuilder::new();
+
+		let program_str = r#"
+class Bar extends Foo {
+	public int methodA() {}
+}
+class Foo {
+	public int methodA() {}
+}
+"#;
+		let program = lnp::parse_decaf(program_str);
+		assert_eq!(program.classes.len(), 2);
+		builder.visit_program(&program);
+
+		match builder.class_map.get(&"Bar".to_string()) {
+			None => assert_eq!(1, 0),
+			Some(woo) => {
+				assert_eq!(woo.name, "Bar");
+				assert_eq!(woo.sup.borrow().as_ref().unwrap().name, "Foo");
+				assert_eq!(woo.pub_methods.borrow().len(), 2);
+				assert_eq!(woo.pub_methods.borrow()[0].name, "methodA");
+				assert_eq!(woo.pub_methods.borrow()[1].name, "methodA");
+			}
+		}
+	}
+
+	#[test]
+	fn test_methods_visibility() {
+		let mut builder = DecafTreeBuilder::new();
+
+		let program_str = r#"
+class Bar extends Foo {
+	public int methodA() {}
+	protected int methodB() {}
+	private int methodC() {}
+}
+class Foo {
+	public int methodA() {}
+	protected int methodB() {}
+	private int methodC() {}
+}
+"#;
+		let program = lnp::parse_decaf(program_str);
+		assert_eq!(program.classes.len(), 2);
+		builder.visit_program(&program);
+
+		match builder.class_map.get(&"Bar".to_string()) {
+			None => assert_eq!(1, 0),
+			Some(woo) => {
+				assert_eq!(woo.name, "Bar");
+				assert_eq!(woo.sup.borrow().as_ref().unwrap().name, "Foo");
+				assert_eq!(woo.pub_methods.borrow().len(), 2);
+				assert_eq!(woo.pub_methods.borrow()[0].name, "methodA");
+				assert_eq!(woo.pub_methods.borrow()[1].name, "methodA");
+				assert_eq!(woo.prot_methods.borrow().len(), 2);
+				assert_eq!(woo.prot_methods.borrow()[0].name, "methodB");
+				assert_eq!(woo.prot_methods.borrow()[1].name, "methodB");
+				assert_eq!(woo.priv_methods.borrow().len(), 1);
+				assert_eq!(woo.priv_methods.borrow()[0].name, "methodC");
+			}
+		}
+	}
+
+
+	// TODO:
+	// test consecutive vardeclarator
 }

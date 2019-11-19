@@ -1,4 +1,5 @@
 extern crate plex;
+use std::fmt;
 
 pub mod lexer {
     use plex::lexer;
@@ -192,6 +193,13 @@ pub mod lexer {
         pub lo: usize,
         pub hi: usize,
     }
+
+	impl fmt::Display for Span {
+		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			use self::Region::*;
+			write!(f, "{},{}", self.lo, self.hi);
+		}
+	}
 
     impl<'a> Iterator for Lexer<'a> {
         type Item = (Token, Span);
