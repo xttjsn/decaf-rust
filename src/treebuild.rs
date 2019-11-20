@@ -87,6 +87,10 @@ impl Visitable for lnp::past::Expression {
 	}
 }
 
+impl Visitable for lnp::past::ActualArgs {
+	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result { visitor.visit_actural_args(self) }
+}
+
 trait Normalize {
 	type Result;
 	fn normalize(&self) -> Self::Result;
@@ -130,6 +134,26 @@ impl Normalize for lnp::past::Method {
 		}
 
 		(return_type, array_lvl, self.name.clone(), args, self.block.clone())
+	}
+}
+
+impl Normalize for lnp::past::Ctor {
+	type Result = (Vec<(String, decaf::TypeBase, u32)>, lnp::past::Block);
+
+	fn normalize(&self) -> Self::Result {
+		use crate::lnp::past::VarDeclaratorIdInner::*;
+		let mut args = vec![];
+		for arg in self.fargs.farg_list.iter() {
+			let (arg_array_lvl, arg_type) = ty2ty(&arg.ty, 0);
+			match &arg.var_decl_id.id {
+				Single(arg_name) => {
+					args.push((arg_name.clone(), arg_type, arg_array_lvl));
+				},
+				Array(_) => panic!("array of ids are not allowed in method argument")
+			}
+		}
+
+		(args, self.block.clone())
 	}
 }
 
@@ -626,7 +650,7 @@ impl Visitor for DecafTreeBuilder {
 		match self.state {
 			First => {
 				// Normalize method
-				let (return_ty, array_lvl, name, args, block) = mthd.normalize();
+				let (return_ty, array_lvl, name, args, _) = mthd.normalize();
 
 				// Get current class
 				let curr_cls = self.get_curr_scope_as_class();
@@ -666,13 +690,21 @@ impl Visitor for DecafTreeBuilder {
 															}
 														))) {
 						method_node.add_arg(arg_name, Rc::new(arg_ty));
+					} else {
+						// Type is unknown at this point of time
+						method_node.add_arg(arg_name, Rc::new(Type {
+							base: arg_ty,
+							array_lvl: arg_array_lvl,
+						}))
 					}
 				}
 
 				// TODO: Set block
 
 				// Check name conflict
-				if curr_cls.pub_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) {
+				if curr_cls.pub_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
+					curr_cls.prot_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
+					curr_cls.priv_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) {
 					panic!("method redefinition")
 				}
 
@@ -699,7 +731,7 @@ impl Visitor for DecafTreeBuilder {
 						};
 					},
 					(0, None) => {
-						// Default to public fields
+						// Default to public methods
 						*method_node.vis.borrow_mut() = Pub;
 						curr_cls.pub_methods.borrow_mut().push(method_node);
 					},
@@ -764,7 +796,7 @@ impl Visitor for DecafTreeBuilder {
 				self.scopes.push(MethodScope(method));
 
 				// Visit block
-				mthd.block.accept(self)?;
+				mthd.block.accept(self)
 			}
 		};
 		Ok(Normal)
@@ -787,7 +819,7 @@ impl Visitor for DecafTreeBuilder {
 		use crate::decaf::Scope::*;
 		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
 						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
-						   SelfMethodCallExpr, StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
+						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
 						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
 		use crate::decaf::LiteralExpr::*;
 		use crate::decaf::Expr::*;
@@ -890,241 +922,118 @@ impl Visitor for DecafTreeBuilder {
 					Err(e) => Err(e)
 				}
 			},
-			PrimaryExpr(ref prim) => {
-				match &prim.prim {
-					NewArray(naexpr) => {
-						match &naexpr.expr {
-							NewCustom(id, dims) => {
-								match dims.accept(self) {
-									Ok(dim_expr) => {
-										let dim_expr = match dim_expr {
-											ExprNode(dim_expr) => dim_expr,
-											_ => Err(E_EXPRNODE_NOT_FOUND),
-										};
-										if dim_expr.get_type().is_arith_type() {
-											// lookup class for id
-											if let Some(cls) = self.class_lookup(id.clone()) {
-												Ok(ExprNode(CreateArray(CreateArrayExpr {
-													ty: ClassTy(cls),
-													array_lvl_expr: Box::new(dim_expr),
-												})))
-											} else {
-												Err(E_CLASS_NOT_DEFINED)
-											}
-										} else {
-											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
-										}
-									}
-									Err(e) => Err(e)
-								}
-							}
-							NewPrimitive(primtype, dims) => {
-								match dims.accept(self) {
-									Ok(dim_expr) => {
-										let dim_expr = match dim_expr {
-											ExprNode(dim_expr) => dim_expr,
-											_ => Err(E_EXPRNODE_NOT_FOUND),
-										};
-										if dim_expr.get_type().is_arith_type() {
-											match primtype {
-												BoolType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
-													ty: BoolTy,
-													array_lvl_expr: Box::new(dim_expr),
-												}))),
-												IntType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
-													ty: IntTy,
-													array_lvl_expr: Box::new(dim_expr),
-												}))),
-												CharType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
-													ty: CharTy,
-													array_lvl_expr: Box::new(dim_expr),
-												}))),
-												VoidType(_) => Err(E_VOID_ARRAY)
-											}
-										} else {
-											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
-										}
-									}
-									Err(e) => Err(e)
-								}
-							}
-						}
-					}
-					NonNewArray(nnaexpr) => {
-						match &nnaexpr.expr {
-							JustLit(litr) => {
-								match &litr.litr {
-									Null => Ok(ExprNode(NULL)),
-									Bool(ref b) => Ok(ExprNode(Literal(BoolLiteral(b.clone())))),
-									Char(ref c) => Ok(ExprNode(Literal(CharLiteral(c.clone())))),
-									Str(ref s) => Ok(ExprNode(Literal(StrLiteral(s.clone())))),
-									Int(ref i) => Ok(ExprNode(Literal(IntLiteral(i.clone())))),
-								}
-							}
-							JustThis => Ok(ExprNode(This)),
-							JustExpr(expr) => expr.accept(self),
-							NewObj(id, args) => {
-								if let Some(cls) = self.class_lookup(id.clone()) {
-									match args.accept(self) {
-										VecExpr(arg_exprs) => {
-											// Check if signature matches with any of the constructors
-											// TODO: create a get_visible_ctors() function to tide things up
-											match if self.has_class_in_scope_stack(&cls) {
-												cls.get_compatible_level0_ctor(&arg_exprs)
-											} else {
-												cls.get_compatible_level1_ctor(&arg_exprs)
-											} {
-												Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
-													cls: cls,
-													ctor: ctor,
-													args: arg_exprs,
-												}))),
-												None => Err(E_NO_COMPATIBLE_CTOR),
-											}
-										}
-										_ => Err(E_VEC_EXPR_NOT_FOUND)
-									}
-								} else {
-									Err(E_CLASS_NOT_DEFINED)
-								}
-							}
-							CallSelfMethod(id, args) => {
-								match args.accept(self) {
-									VecExpr(arg_exprs) => {
-										// Lookup the method
-										let mlookup = |cls| {
-											match cls.get_compatible_level0_method(&arg_exprs) {
-												Some(method) => Ok(ExprNode(SelfMethodCall(SelfMethodCallExpr {
-													cls: cls,
-													method: method,
-													args: arg_exprs,
-												}))),
-												None => Err(E_NO_COMPATIBLE_METHOD)
-											}
-										};
-										match self.scopes.iter().rev().find(|scope| {
-											match scope {
-												ClassScope(cls) => if let Ok(expr_node) = mlookup(cls.clone()) {
-													Some(expr_node);
-												} else {
-													None
-												}
-												_ => None
-											}
-										}) {
-											Some(expr) => expr,
-											None => Err(E_NO_COMPATIBLE_METHOD)
-										}
-									}
-									_ => Err(E_VEC_EXPR_NOT_FOUND)
-								}
-							}
-							CallMethod(nprim, id, args) => {
-								match args.accept(self) {
-									VecExpr(arg_exprs) => {
-										match nprim.accept(self) {
-											ExprNode(prim_expr) => {
-												let prim_ty = prim_expr.get_type();
-												if let ClassTy(cls) = prim_ty.base {
-													if prim_ty.array_lvl == 0 {
-														// Lookup method
-														match if self.has_class_in_scope_stack(&cls) {
-															cls.get_compatible_level0_method(&arg_exprs)
-														} else {
-															cls.get_compatible_level1_method(&arg_exprs)
-														} {
-															Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
-																cls: cls,
-																prim: prim_expr,
-																method: method,
-																args: arg_exprs
-															}))),
-															None => Err(E_NO_COMPATIBLE_METHOD)
-														}
-													} else {
-														Err(E_ARRAY_TYPE_NOT_SUPPORT_METHOD_CALL)
-													}
-												} else {
-													Err(E_NON_CLASS_TYPE_NOT_SUPPORT_METHOD_CALL)
-												}
-											},
-											ClassNode(cls) => {
-												// This is a static method call
-												match if self.has_class_in_scope_stack(&cls) {
-													cls.get_compatible_level0_static_method(&arg_exprs)
-												} else {
-													cls.get_compatible_level1_static_method(&arg_exprs)
-												} {
-													Some(method) => Ok(ExprNode(StaticMethodCall(StaticMethodCallExpr {
-														cls: cls,
-														method: method,
-														args: arg_exprs
-													}))),
-													None => Err(E_NO_COMPATIBLE_METHOD)
-												}
-											}
-											_ => Err(E_EXPR_NODE_NOT_FOUND)
-										}
-									}
-									_ => Err(E_VEC_EXPR_NOT_FOUND)
-								}
-							}
-							CallSuper(id, args) => {
-								match args.accept(self) {
-									VecExpr(arg_exprs) => {
-										// NOTE: make it recursive if we support nested class
-										match self.get_last_class_scope_as_class() {
-											Some(cls) => {
-												match cls.get_compatible_super_level0_method_and_super(&arg_exprs) {
-													Some((method, sup)) => Ok(ExprNode(SuperCall(SuperCallExpr {
-														cls: cls,
-														sup: sup,
-														method: method,
-														args: arg_exprs,
-													}))),
-													None => Err(E_NO_COMPATIBLE_METHOD)
-												}
-											}
-											None => Err(E_SUPER_CALL_WITHOUT_CLASS)
-										}
-									}
-								}
-							}
-							EvalArray(arrexpr) => {
-								match &arrexpr.expr {
-									SimpleArraryExpr(id, dim) => {
-										// Lookup id, must have array_lvl
-										match self.variable_lookup(id) {
-											Some(inst) => {
-												let ty = inst.get_type();
-												
-											}
-										}
-									}
-									ComplexArrayExpr(nna, dim) => {
-
-									}
-								}
-							}
-							EvalField(fldexpr) => {}
-						}
-					}
-					Identifier(id) => {
-
-					}
-				}
-			}
+			PrimaryExpr(ref prim) => prim.accept(self),
 		}
 		Ok(BuilderResult::Normal)
+	}
+
+	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
+		use crate::decaf::SemanticError::*;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
+		use crate::decaf::Type;
+		use crate::decaf::TypeBase::*;
+		use crate::lnp::past::Modifier::*;
+		use crate::decaf::Visibility::*;
+		use crate::decaf::Scope::*;
+		match self.state {
+			First => {
+				// Normalize Ctor
+				let (args, _) = ctor.normalize();
+
+				// Get current class
+				let curr_cls = self.get_curr_scope_as_class();
+
+				// Create ctor node
+				let ctor_node = Rc::new(crate::decaf::Ctor::new(curr_cls));
+
+				// Get arg type
+				for (arg_name, arg_ty, arg_array_lvl) in args.into_iter() {
+					let tmp = ctor_node.clone();
+					let tmp_name = arg_name.clone();
+					if let Some(arg_ty) = self.type_add(arg_ty,
+														arg_array_lvl,
+														Some(Box::new(
+															move |cls_ty| {
+																tmp.set_arg_type(tmp_name.clone(), Rc::new(Type {
+																	base: ClassTy(cls_ty),
+																	array_lvl: array_lvl,
+																}));
+																None
+															}
+														))) {
+						ctor_node.add_arg(arg_name, Rc::new(arg_ty));
+					} else {
+						// Type is unknown at this time
+						ctor_node.add_arg(arg_name, Rc::new(Type {
+							base: arg_ty,
+							array_lvl: arg_array_lvl,
+						}))
+					}
+				}
+
+				// Check signature conflict
+				if curr_cls.pub_ctors.borrow().iter().any(|m| m.has_same_signature(ctor_node.as_ref())) ||
+					curr_cls.prot_ctors.borrow().iter().any(|m| m.has_same_signature(ctor_node.as_ref())) ||
+					curr_cls.priv_ctors.borrow().iter().any(|m| m.has_same_signature(ctor_node.as_ref())) {
+					panic!("ctor redefinition")
+				}
+
+				// Store ctor according to modifiers
+				match (ctor.modies.len(), ctorn.modies.last()) {
+					(1, Some(modifier)) => {
+						match modifier {
+							ModPublic(_) => {
+								*ctor_node.vis.borrow_mut() = Pub;
+								curr_cls.pub_ctors.borrow_mut().push(ctor_node);
+							}
+							ModPrivate(_) => {
+								*ctor_node.vis.borrow_mut() = Priv;
+								curr_cls.priv_ctors.borrow_mut().push(ctor_node);
+							}
+							ModProtected(_) => {
+								*ctor_node.vis.borrow_mut() = Prot;
+								curr_cls.prot_ctors.borrow_mut().push(ctor_node);
+							}
+							ModStatic(_) => {
+								panic!("invalid modifier static for constructors");
+							}
+						};
+					},
+					(0, None) => {
+						// Default to public ctors
+						*ctor_node.vis.borrow_mut() = Pub;
+						curr_cls.pub_ctors.borrow_mut().push(ctor_node);
+					},
+					_ => {
+						return Err(InvalidModifier(ctor.span.clone()));
+					}
+				};
+			}
+			Second => {
+				// Get current class
+				let cls = self.get_curr_scope_as_class();
+
+				// Normalize ctor
+				let (args, block) = ctor.normalize();
+
+				// Get current ctor
+				let ctor = cls.get_ctor_by_signature(&args).unwrap();
+
+				// Push new scope
+				self.scopes.push(CtorScope(ctor));
+
+				// Visit block
+				ctor.block.accept(self)
+			}
+		}
+		Ok(Normal)
 	}
 
 	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
 		Ok(BuilderResult::Normal)
 	}
 
-	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
 
 	fn visit_formalarg(&mut self, farg: &lnp::past::FormalArg) -> Self::Result {
 		Ok(BuilderResult::Normal)
@@ -1163,12 +1072,378 @@ impl Visitor for DecafTreeBuilder {
 		Ok(BuilderResult::Normal)
 	}
 	fn visit_primary(&self, prim: &lnp::past::Primary) -> Self::Result {
+		use crate::decaf::SemanticError::*;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
+		use crate::lnp::past::Expr::*;
+		use crate::lnp::past::BinOp::*;
+		use crate::lnp::past::UnOp::*;
+		use crate::lnp::past::Prim::*;
+		use crate::lnp::past::PrimitiveType::*;
+		use crate::lnp::past::Litr::*;
+		use crate::lnp::past::NAExpr::*;
+		use crate::lnp::past::NNAExpr::*;
+		use crate::lnp::past::AExpr::*;
+		use crate::decaf::TypeBase::*;
+		use crate::decaf::Scope::*;
+		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
+						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
+						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
+						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
+		use crate::decaf::LiteralExpr::*;
+		use crate::decaf::Expr::*;
+		match &prim.prim {
+			NewArray(naexpr) => {
+				match &naexpr.expr {
+					NewCustom(id, dims) => {
+						match dims.accept(self) {
+							Ok(dims_expr) => {
+								match dims_expr {
+									VecExpr(dims_expr) => {
+										if dim_expr.get_type().is_arith_type() {
+											// lookup class for id
+											if let Some(cls) = self.class_lookup(id.clone()) {
+												Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: ClassTy(cls),
+													dims: dims_expr,
+												})))
+											} else {
+												Err(E_CLASS_NOT_DEFINED)
+											}
+										} else {
+											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+										}
+									},
+									_ => Err(E_VEC_EXPR_NOT_FOUND),
+								};
+							}
+							Err(e) => Err(e)
+						}
+					}
+					NewPrimitive(primtype, dims) => {
+						match dims.accept(self) {
+							Ok(dims_expr) => {
+								match dims_expr {
+									VecExpr(dims_expr) => {
+										if dims_expr.get_type().is_arith_type() {
+											match primtype {
+												BoolType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: BoolTy,
+													dims: dims_expr,
+												}))),
+												IntType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: IntTy,
+													dims: dims_expr,
+												}))),
+												CharType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
+													ty: CharTy,
+													dims: dims_expr,
+												}))),
+												VoidType(_) => Err(E_VOID_ARRAY)
+											}
+										} else {
+											Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+										}
+									},
+									_ => Err(E_EXPRNODE_NOT_FOUND),
+								};
+							}
+							Err(e) => Err(e)
+						}
+					}
+				}
+			}
+			NonNewArray(nnaexpr) => nnaexpr.expr.accept(self),
+			Identifier(id) => {
+				match id {
+					"this" => Ok(ExprNode(This)),
+					_ => match self.variable_lookup(id) {
+						Some(var) => Ok(ExprNode(Variable(VariableExpr {
+							var: var,
+						}))),
+						None => Err(E_VARIABLE_NOT_DEFINED)
+					}
+				}
+			}
+		}
 		Ok(BuilderResult::Normal)
 	}
 	fn visit_naexpr(&self, expr: &lnp::past::NewArrayExpr) -> Self::Result {
 		Ok(BuilderResult::Normal)
 	}
-	fn visit_nnaexpr(&self, expr: &lnp::past::NNAExpr) -> Self::Result {
+	fn visit_nnaexpr(&self, nnaexpr: &lnp::past::NNAExpr) -> Self::Result {
+		use crate::decaf::SemanticError::*;
+		use self::BuilderState::*;
+		use self::BuilderResult::*;
+		use crate::lnp::past::Expr::*;
+		use crate::lnp::past::BinOp::*;
+		use crate::lnp::past::UnOp::*;
+		use crate::lnp::past::Prim::*;
+		use crate::lnp::past::PrimitiveType::*;
+		use crate::lnp::past::Litr::*;
+		use crate::lnp::past::NAExpr::*;
+		use crate::lnp::past::NNAExpr::*;
+		use crate::lnp::past::AExpr::*;
+		use crate::lnp::past::FExpr::*;
+		use crate::decaf::TypeBase::*;
+		use crate::decaf::Scope::*;
+		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
+						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
+						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
+						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
+		use crate::decaf::LiteralExpr::*;
+		use crate::decaf::Expr::*;
+		match &nnaexpr {
+			JustLit(litr) => {
+				match &litr.litr {
+					Null => Ok(ExprNode(NULL)),
+					Bool(ref b) => Ok(ExprNode(Literal(BoolLiteral(b.clone())))),
+					Char(ref c) => Ok(ExprNode(Literal(CharLiteral(c.clone())))),
+					Str(ref s) => Ok(ExprNode(Literal(StrLiteral(s.clone())))),
+					Int(ref i) => Ok(ExprNode(Literal(IntLiteral(i.clone())))),
+				}
+			}
+			JustThis => Ok(ExprNode(This)),
+			JustExpr(expr) => expr.accept(self),
+			NewObj(id, args) => {
+				if let Some(cls) = self.class_lookup(id.clone()) {
+					match args.accept(self) {
+						VecExpr(arg_exprs) => {
+							// Check if signature matches with any of the constructors
+							// TODO: create a get_visible_ctors() function to tide things up
+							match if self.has_class_in_scope_stack(&cls) {
+								cls.get_compatible_level0_ctor(&arg_exprs)
+							} else {
+								cls.get_compatible_level1_ctor(&arg_exprs)
+							} {
+								Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
+									cls: cls,
+									ctor: ctor,
+									args: arg_exprs,
+								}))),
+								None => Err(E_NO_COMPATIBLE_CTOR),
+							}
+						}
+						_ => Err(E_VEC_EXPR_NOT_FOUND)
+					}
+				} else {
+					Err(E_CLASS_NOT_DEFINED)
+				}
+			}
+			CallSelfMethod(id, args) => {
+				match args.accept(self) {
+					VecExpr(arg_exprs) => {
+						// Lookup the method
+						let mlookup = |cls| {
+							match cls.get_compatible_level0_method(&arg_exprs) {
+								Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
+									var: This,
+									cls: cls,
+									method: method,
+									args: arg_exprs,
+								}))),
+								None => Err(E_NO_COMPATIBLE_METHOD)
+							}
+						};
+						match self.scopes.iter().rev().find(|scope| {
+							match scope {
+								ClassScope(cls) => if let Ok(expr_node) = mlookup(cls.clone()) {
+									Some(expr_node);
+								} else {
+									None
+								}
+								_ => None
+							}
+						}) {
+							Some(expr) => expr,
+							None => Err(E_NO_COMPATIBLE_METHOD)
+						}
+					}
+					_ => Err(E_VEC_EXPR_NOT_FOUND)
+				}
+			}
+			CallMethod(nprim, id, args) => {
+				match args.accept(self) {
+					VecExpr(arg_exprs) => {
+						match nprim.accept(self) {
+							ExprNode(prim_expr) => {
+								let prim_ty = prim_expr.get_type();
+								if let ClassTy(cls) = prim_ty.base {
+									if prim_ty.array_lvl == 0 {
+										// Lookup method
+										match if self.has_class_in_scope_stack(&cls) {
+											cls.get_compatible_level0_method(&arg_exprs)
+										} else {
+											cls.get_compatible_level1_method(&arg_exprs)
+										} {
+											Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
+												var: prim_expr,
+												cls: cls,
+												method: method,
+												args: arg_exprs
+											}))),
+											None => Err(E_NO_COMPATIBLE_METHOD)
+										}
+									} else {
+										Err(E_ARRAY_TYPE_NOT_SUPPORT_METHOD_CALL)
+									}
+								} else {
+									Err(E_NON_CLASS_TYPE_NOT_SUPPORT_METHOD_CALL)
+								}
+							},
+							ClassNode(cls) => {
+								// This is a static method call
+								match if self.has_class_in_scope_stack(&cls) {
+									cls.get_compatible_level0_static_method(&arg_exprs)
+								} else {
+									cls.get_compatible_level1_static_method(&arg_exprs)
+								} {
+									Some(method) => Ok(ExprNode(StaticMethodCall(StaticMethodCallExpr {
+										cls: cls,
+										method: method,
+										args: arg_exprs
+									}))),
+									None => Err(E_NO_COMPATIBLE_METHOD)
+								}
+							}
+							_ => Err(E_EXPR_NODE_NOT_FOUND)
+						}
+					}
+					_ => Err(E_VEC_EXPR_NOT_FOUND)
+				}
+			}
+			CallSuper(id, args) => {
+				match args.accept(self) {
+					VecExpr(arg_exprs) => {
+						// NOTE: make it recursive if we support nested class
+						match self.get_last_class_scope_as_class() {
+							Some(cls) => {
+								match cls.get_compatible_super_level0_method_and_super(&arg_exprs) {
+									Some((method, sup)) => Ok(ExprNode(SuperCall(SuperCallExpr {
+										cls: cls,
+										sup: sup,
+										method: method,
+										args: arg_exprs,
+									}))),
+									None => Err(E_NO_COMPATIBLE_METHOD)
+								}
+							}
+							None => Err(E_SUPER_CALL_WITHOUT_CLASS)
+						}
+					}
+				}
+			}
+			EvalArray(arrexpr) => {
+				match &arrexpr.expr {
+					SimpleArraryExpr(id, dim) => {
+						// Lookup id, must have array_lvl
+						match self.variable_lookup(id) {
+							Some(inst) => {
+								match dim.accept(self) {
+									Ok(idx_expr) => match idx_expr {
+										ExprNode(idx_expr) => {
+											let ty = inst.get_type();
+											if ty.array_lvl > 0 {
+												Ok(ExprNode(ArrayAccess(ArrayAccessExpr {
+													var: inst,
+													idx: idx_expr,
+												})))
+											} else {
+												Err(E_ARRAY_ACCESS_ON_NONARRAY_TYPE)
+											}
+										}
+										_ => Err(E_EXPR_NODE_NOT_FOUND)
+									}
+									Err(e) => Err(e)
+								}
+							}
+						}
+					}
+					ComplexArrayExpr(nna, dim) => {
+						match nna.expr.accept(self) {
+							Ok(prim_expr) => match prim_expr {
+								ExprNode(prim_expr) => {
+									let ty = prim_expr.get_type();
+									if ty.array_lvl > 0 {
+										match dim.accept(self) {
+											Ok(dim_expr) => match dim_expr {
+												ExprNode(dim_expr) => {
+													Ok(ExprNode(ArrayAccess(ArrayAccessExpr {
+														var: prim_expr,
+														idx: dim_expr,
+													})))
+												}
+												_ => Err(E_EXPR_NODE_NOT_FOUND)
+											}
+											Err(e) => Err(e)
+										}
+									} else {
+										Err(E_)
+									}
+								}
+								_ => Err(E_EXPR_NODE_NOT_FOUND)
+							}
+							Err(e) => Err(e)
+						}
+					}
+				}
+			}
+			EvalField(fldexpr) => {
+				match &fldexpr.expr {
+					PrimaryFieldExpr(prim, id) => {
+						match prim.accept(self) {
+							Ok(prim_expr) => match prim_expr {
+								ExprNode(prim_expr) => {
+									// Lookup field
+									let ty = prim_expr.get_type();
+									match ty.base {
+										ClassTy(cls) => {
+											match ty.array_lvl {
+												0 => {
+													match if self.has_class_in_scope_stack(&cls) {
+														cls.get_level0_field_by_name(id)
+													} else {
+														cls.get_level1_field_by_name(id)
+													} {
+														Some(fld) => Ok(ExprNode(FieldAccess(FieldAccessExpr {
+															var: prim_expr,
+															cls: cls,
+															fld: fld,
+														}))),
+														None => Err(E_NO_COMPATIBLE_FIELD)
+													}
+												}
+												_ => Err(E_ARRAY_TYPE_NO_FIELD)
+											}
+										}
+										_ => Err(E_PRIMITIVE_TYPE_NO_FIELD)
+									}
+								}
+								_ => Err(E_EXPR_NODE_NOT_FOUND)
+							}
+							Err(e) => Err(e)
+						}
+					}
+					SuperFieldExpr(id) => {
+						// Since class inherited all fields, this is a simple field lookup
+						// NOTE: this implies that hidden fields will never be accessed even in this scenario
+						match self.get_last_class_scope_as_class() {
+							Some(cls) => {
+								match cls.get_level0_field_by_name(id) {
+									Some(fld) => Ok(ExprNode(FieldAccess(FieldAccessExpr {
+										var: This,
+										cls: cls,
+										fld: fld,
+									}))),
+									None => Err(E_NO_COMPATIBLE_FIELD)
+								}
+							}
+							None => Err(E_FIELD_ACCESS_WITHOUT_CLASS)
+						}
+					}
+				}
+			}
+		}
 		Ok(BuilderResult::Normal)
 	}
 	fn visit_new_obj(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result {
@@ -1190,6 +1465,21 @@ impl Visitor for DecafTreeBuilder {
 		Ok(BuilderResult::Normal)
 	}
 	fn visit_actural_args(&self, args: &lnp::past::ActualArgs) -> Self::Result {
-		Ok(BuilderResult::Normal)
+		use self::BuilderResult::*;
+		let mut res = vec![];
+		for arg in args.exprs.iter() {
+			match arg.accept(self) {
+				Ok(arg_expr) => match arg_expr {
+					ExprNode(arg_expr) => {
+						res.push(arg_expr);
+					}
+					_ => {
+						return Err(E_EXPR_NODE_NOT_FOUND);
+					}
+				}
+				Err(e) => { return Err(e); }
+			}
+		}
+		Ok(VecExpr(res))
 	}
 }

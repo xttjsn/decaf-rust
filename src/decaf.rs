@@ -123,7 +123,56 @@ impl Method {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Ctor {
 	pub cls: Rc<Class>,
+	pub vis: RefCell<Visibility>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>
+}
+
+impl Ctor {
+	pub fn new(cls: Rc<Class>) -> Self {
+		Ctor {
+			cls: cls,
+			vis: RefCell::new(Visibility::Pub),
+			args: RefCell::new(vec![]),
+		}
+	}
+
+	pub fn add_arg(&self, arg_name: String, arg_ty: Rc<Type>) {
+		// Check name conflicts
+		if self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+			panic!("argument name conflict in method")
+		}
+		self.args.borrow_mut().push((arg_name, arg_ty));
+	}
+
+	pub fn set_arg_type(&self, arg_name: String, arg_ty: Rc<Type>) {
+		if !self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+			panic!("argument not found in method")
+		}
+		self.args.replace_with(|v| v.into_iter().map(|(name, ty)| {
+			if name == &arg_name {
+				(name.clone(), arg_ty.clone())
+			} else {
+				(name.clone(), ty.clone())
+			}
+		}).collect());
+	}
+
+	pub fn has_same_signature(&self, other: &Self) -> bool {
+		if self.args.borrow().len() != other.args.borrow().len() {
+			return false;
+		}
+		for (lhs, rhs) in self.args.borrow().iter().zip(other.args.borrow().iter()) {
+			// Compare type
+			let (lhs, rhs) = (lhs.1.as_ref(), rhs.1.as_ref());
+			if lhs.array_lvl != rhs.array_lvl {
+				return false;
+			}
+			if lhs.base != rhs.base {
+				return false;
+			}
+		}
+		return true;
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -132,6 +181,18 @@ pub struct Block {
 
 pub trait Value {
 	fn addressable(&self) -> bool;
+}
+
+pub struct Variable {
+	pub name: String,
+	pub ty: Type,
+	// pub addr: LLVMValue
+}
+
+impl Value for Variable {
+	fn addressable(&self) -> bool {
+		true
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -147,7 +208,6 @@ pub enum Expr {
 	This,
 	NULL,
 	CreateObj(CreateObjExpr),
-	SelfMethodCall(SelfMethodCallExpr),
 	MethodCall(MethodCallExpr),
 	StaticMethodCall(StaticMethodCallExpr),
 	SuperCall(SuperCallExpr),
@@ -172,7 +232,6 @@ impl Value for Expr {
 			This => true,
 			NULL => false,
 			CreateObj(_) => false,
-			SelfMethodCall(_) => false,
 			StaticMethodCall(_) => false,
 			MethodCall(_) => false,
 			SuperCall(_) => false,
@@ -224,7 +283,7 @@ pub struct BinCmpExpr {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateArrayExpr {
 	ty: TypeBase,
-	array_lvl_expr: Box<Expr>,
+	dims: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -243,16 +302,9 @@ pub struct CreateObjExpr {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct SelfMethodCallExpr {
-	cls: Rc<Class>,
-	method: Rc<Method>,
-	args: Vec<Expr>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
 pub struct MethodCallExpr {
+	var: Expr,
 	cls: Rc<Class>,
-	prim: Expr,
 	method: Rc<Method>,
 	args: Vec<Expr>,
 }
@@ -274,19 +326,26 @@ pub struct SuperCallExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ArrayAccessExpr {
+	var: Expr,
+	idx: Expr,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FieldAccessExpr {
+	var: Expr,
+	cls: Rc<Class>,
+	fld: Rc<Field>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct VariableExpr {
+	var: Rc<Variable>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Scope {
 	ClassScope(Rc<Class>),
+	CtorScope(Rc<Ctor>),
 	MethodScope(Rc<Method>),
 	BlockScope(Rc<Block>),
 	GlobalScope,
@@ -497,16 +556,16 @@ impl Class {
 	}
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Expression {
-	Binary(Box<Expression>, BinOp, Box<Expression>),
-	Unary(UnOp, Box<Expression>),
-	NewClassArray(Rc<Class>, Vec<Expression>),
-	NewPrimitive(Primitive, Vec<Expression>),
-	Literal(Litr),
-	This,
-	NewObject(Rc<Class>, Vec<Expression>),
-	MethodCall(Rc<ClassInst>, Vec<Expression>),
-	SuperCall(Rc<ClassInst>, Vec<Expression>),
+// #[derive(Debug, PartialEq, Clone)]
+// pub enum Expression {
+// 	Binary(Box<Expression>, BinOp, Box<Expression>),
+// 	Unary(UnOp, Box<Expression>),
+// 	NewClassArray(Rc<Class>, Vec<Expression>),
+// 	NewPrimitive(Primitive, Vec<Expression>),
+// 	Literal(Litr),
+// 	This,
+// 	NewObject(Rc<Class>, Vec<Expression>),
+// 	MethodCall(Rc<ClassInst>, Vec<Expression>),
+// 	SuperCall(Rc<ClassInst>, Vec<Expression>),
 
-}
+// }
