@@ -3,7 +3,7 @@ use crate::decaf;
 use crate::decaf::{Value};
 use std::rc::Rc;
 use std::collections::BTreeMap;
-use crate::lnp::past::{UnaryOp, Litr};
+use crate::lnp::past::{UnaryOp, Litr, Statement};
 
 pub trait Visitor {
 	type Result;
@@ -96,20 +96,19 @@ trait Normalize {
 	fn normalize(&self) -> Self::Result;
 }
 
-fn ty2ty(ty: &lnp::past::Type, lvl: u32) -> (u32, decaf::TypeBase) {
-	// Count array nesting level from type
-	match ty {
-		lnp::past::Type::Primitive(prim) => {
-			match prim {
-				lnp::past::PrimitiveType::BoolType(_) => (lvl, decaf::TypeBase::BoolTy),
-				lnp::past::PrimitiveType::CharType(_) => (lvl, decaf::TypeBase::CharTy),
-				lnp::past::PrimitiveType::IntType(_) => (lvl, decaf::TypeBase::IntTy),
-				lnp::past::PrimitiveType::VoidType(_) => (lvl, decaf::TypeBase::VoidTy),
-			}
-		}
-		lnp::past::Type::Custom(cls_name) => (lvl, decaf::TypeBase::UnknownTy(cls_name.to_string())),
-		lnp::past::Type::Array(ty) => ty2ty(&*ty, lvl + 1),
-	}
+trait ASTBuilder {
+	type Type;
+	type TypeBase;
+	type ClassHook;
+	type Class;
+	fn type_add(&mut self, base_ty: Self::TypeBase, array_lvl: u32, hook: Option<ClassHook>) -> Option<Self::Type>;
+	fn class_lookup(&self, cls_name: String) -> Option<Rc<Self::Class>>;
+	fn class_add(&mut self, cls_name: String, cls: Rc<Self::Class>);
+	fn add_class_resolution_hook(&mut self, cls_name: String, f: Self::ClassHook);
+	fn invoke_class_resolution_hook(&mut self, cls_name: String, cls: Rc<Self::Class>);
+	fn get_curr_scope_as_class(&self) -> Rc<Self::Class>;
+	fn has_class_in_scope_stack(&self, cls: &Rc<Self::Class>) -> bool;
+	fn load_builtin(&mut self);
 }
 
 impl Normalize for lnp::past::Method {
@@ -189,6 +188,63 @@ impl Normalize for lnp::past::VarDeclarator {
 	}
 }
 
+fn ty2ty(ty: &lnp::past::Type, lvl: u32) -> (u32, decaf::TypeBase) {
+	// Count array nesting level from type
+	match ty {
+		lnp::past::Type::Primitive(prim) => {
+			match prim {
+				lnp::past::PrimitiveType::BoolType(_) => (lvl, decaf::TypeBase::BoolTy),
+				lnp::past::PrimitiveType::CharType(_) => (lvl, decaf::TypeBase::CharTy),
+				lnp::past::PrimitiveType::IntType(_) => (lvl, decaf::TypeBase::IntTy),
+				lnp::past::PrimitiveType::VoidType(_) => (lvl, decaf::TypeBase::VoidTy),
+			}
+		}
+		lnp::past::Type::Custom(cls_name) => (lvl, decaf::TypeBase::UnknownTy(cls_name.to_string())),
+		lnp::past::Type::Array(ty) => ty2ty(&*ty, lvl + 1),
+	}
+}
+
+fn ty2ty2<B: ASTBuilder>(ty: &lnp::past::Type, lvl: u32, builder: &B) -> decaf::Type {
+	use decaf::TypeBase::*;
+	// Count array nesting level from type
+	match ty {
+		lnp::past::Type::Primitive(prim) => {
+			match prim {
+				lnp::past::PrimitiveType::BoolType(_) => decaf::Type {
+					base: decaf::TypeBase::BoolTy,
+					array_lvl: lvl,
+				},
+				lnp::past::PrimitiveType::CharType(_) => decaf::Type {
+					base: decaf::TypeBase::CharType,
+					array_lvl: lvl,
+				},
+				lnp::past::PrimitiveType::IntType(_) => decaf::Type {
+					base: decaf::TypeBase::IntType,
+					array_lvl: lvl,
+				},
+				lnp::past::PrimitiveType::VoidType(_) => match lvl {
+					0 => decaf::Type {
+						base: decaf::TypeBase::VoidType,
+						array_lvl: 0,
+					},
+					_ => panic!("void type cannot be array")
+				}
+			}
+		}
+		lnp::past::Type::Custom(cls_name) => {
+			// Lookup class
+			match builder.class_lookup(cls_name) {
+				Some(cls) => decaf::Type {
+					base: ClassTy(cls),
+					array_lvl: lvl,
+				},
+				None => panic!("class {} not found", cls_name)
+			}
+		}
+		lnp::past::Type::Array(ty) => ty2ty2(&*ty, lvl + 1, builder),
+	}
+}
+
 pub enum BuilderState {
 	First, // Symbol resolution
 	Second,
@@ -199,6 +255,8 @@ pub enum BuilderResult {
 	ExprNode(decaf::Expr),
 	VecExpr(Vec<decaf::Expr>),
 	ClassNode(Rc<decaf::Class>),
+    StmtNode(decaf::Stmt),
+    VecStmt(Vec<decaf::Stmt>),
 }
 
 // trait Scope {
@@ -286,8 +344,6 @@ pub struct DecafTreeBuilder {
 	pub class_map: BTreeMap<String, Rc<decaf::Class>>,
 }
 
-type ClassHook = Box<dyn FnMut(Rc<decaf::Class>) -> Option<Rc<decaf::Class>>>;
-
 impl DecafTreeBuilder {
 	pub fn new() -> Self {
 		DecafTreeBuilder {
@@ -297,6 +353,13 @@ impl DecafTreeBuilder {
 			class_map: BTreeMap::new(),
 		}
 	}
+}
+
+impl ASTBuilder for DecafTreeBuilder {
+	type Type = decaf::Type;
+	type TypeBase = decaf::TypeBase;
+	type ClassHook = Box<dyn FnMut(Rc<decaf::Class>) -> Option<Rc<decaf::Class>>>;
+	type Class = decaf::Class;
 
 	fn type_add(&mut self,
 				base_ty: decaf::TypeBase,
@@ -418,10 +481,6 @@ impl DecafTreeBuilder {
 		// TODO: load built-in classes: Object, String and IO
 		self.class_map.insert("Object".to_string(), Rc::new(decaf::Class::new("Object".to_string())));
 		// TODO: reset scopes
-	}
-
-	fn save_classes(&mut self) {
-		// Save
 	}
 }
 
@@ -835,7 +894,7 @@ impl Visitor for DecafTreeBuilder {
 							}
 						};
 						// TODO : Ord trait for Type
-						match lhs.get_type().is_compatible(rhs.get_type()) {
+						match lhs.get_type().is_compatible_with(rhs.get_type()) {
 							true => {
 								match binop.op {
 									AssignOp => {
@@ -1031,9 +1090,258 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
-		Ok(BuilderResult::Normal)
+		use self::BuilderResult::*;
+		use self::BuilderState::*;
+		use crate::decaf::Scope::*;
+		match self.state {
+			First => panic!("block should not be visited in the first pass"),
+			Second => {
+				// Create a new block
+				let block_node = Rc::new(decaf::Block {});
+				self.scopes.push(BlockScope(block_node));
+				for stmt in block.stmts.iter() {
+					stmt.accept(self)?;
+				}
+
+			}
+		}
+		Ok(Normal)
 	}
 
+	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result {
+		use self::BuilderResult::*;
+		use self::BuilderState::*;
+		use crate::lnp::past::Stmt::*;
+		use crate::decaf::Stmt::*;
+		match self.state {
+			First => panic!("stmt should not be visited in the first pass"),
+			Second => {
+				match &stmt.stmt {
+					EmptyStmt => {}
+					DeclareStmt(ty, var_decls) => {
+							let ty = ty2ty2(ty, 0, self);
+							let mut res = vec![];
+							for var_decl in var_decls.iter() {
+								// Normalize vardecl
+								let (array_cnt, name, init_expr) = var_decl.normalize();
+
+								// Check for name conflict and add variable
+								match self.variable_lookup(name.clone()) {
+									Some(_) => {
+										return Err(E_VARIABLE_REDEFINITION);
+									}
+									None => {
+										let real_ty = decaf::Type {
+											base: ty.base.clone(),
+											array_lvl: ty.array_lvl + array_cnt,
+										};
+
+										// Check if init_expr matches with type
+										match init_expr {
+											Some(init_expr) => {
+												match init_expr.accept(self) {
+													Ok(ini_expr) => match init_expr {
+														ExprNode(init_expr) => {
+															let init_expr_ty = init_expr.get_type();
+															if init_expr_ty.is_compatible_with(real_ty) {
+																self.variable_add(name.clone(), real_ty.clone());
+																res.push(decaf::DeclareStmt {
+																	name: name.clone(),
+																	ty: real_ty,
+																	init_expr: Some(init_expr),
+																});
+															} else {
+																return Err(E_EXPR_NOT_COMPATIBLE_TYPE);
+															}
+														},
+														_ => return Err(E_EXPR_NODE_NOT_FOUND)
+													}
+													Err(e) => return Err(e)
+												}
+											}
+											None => {
+												self.variable_add(name.clone(), real_ty.clone());
+												res.push(decaf::DeclareStmt {
+													name: name.clone(),
+													ty: real_ty,
+													init_expr: None,
+												});
+											}
+										};
+									}
+								}
+							}
+							Ok(VecStmt(res))
+						}
+					IfStmt(condexpr, thenstmt) =>
+						match condexpr.accept(self) {
+							Ok(condexpr) => {
+								match condexpr {
+									ExprNode(condexpr) => {
+										if condexpr.get_type().is_logical_type() {
+											match thenstmt.accept(self) {
+												Ok(thenstmt) => {
+													match thenstmt {
+														StmtNode(thenstmt) => match thenstmt {
+															Block(thenblock) =>
+																Ok(StmtNode(If(decaf::IfStmt{
+																	cond: condexpr,
+																	thenblock,
+																}))),
+															_ => Err(E_BLOCK_STMT_NOT_FOUND)
+														}
+														_ => Err(E_STMT_OR_VEC_STMT_NOT_FOUND)
+													}
+												},
+												Err(e) => Err(e)
+											}
+										} else {
+											Err(E_COND_NOT_LOGICAL_TYPE)
+										}
+									}
+									_ => Err(E_EXPR_NODE_NOT_FOUND)
+								}
+							},
+							Err(e) => Err(e)
+						},
+					IfElseStmt(condexpr, thenstmt, elsestmt) =>
+						match condexpr.accept(self) {
+							Ok(condexpr) => match condexpr {
+								ExprNode(condexpr) => {
+									if condexpr.get_type().is_logical_type() {
+										match (thenstmt.accept(self), elsestmt.accept(self)) {
+											(Ok(thenstmt), Ok(elsestmt)) => match (thenstmt, elsestmt) {
+												(StmtNode(thenstmt), StmtNode(elsestmt)) =>
+													match (thenstmt, elsestmt) {
+														(Block(thenblock), Block(elseblock)) =>
+															Ok(StmtNode(IfElse(decaf::IfElseStmt {
+																cond: condexpr,
+																thenblock,
+																elseblock,
+															}))),
+														_ => Err(E_BLOCK_STMT_NOT_FOUND)
+													},
+												_ => (E_STMT_NODE_NOT_FOUND)
+											},
+											(Err(e), _) | (_, Err(e)) => Err(e)
+										}
+									} else {
+										Err(E_COND_NOT_LOGICAL_TYPE)
+									}
+								}
+								_ => Err(E_EXPR_NODE_NOT_FOUND)
+							},
+							Err(e) => Err(e)
+						},
+					ExprStmt(expr) => {
+						use crate::decaf::Expr::*;
+						match expr.accept(self) {
+							Ok(expr) =>
+								match expr {
+									ExprNode(expr) => Ok(StmtNode(Expr(decaf::ExprStmt {
+										expr,
+									}))),
+									_ => Err(E_EXPR_NODE_NOT_FOUND)
+								},
+
+							Err(e) => Err(e)
+						}
+					}
+					WhileStmt(condexpr, stmt) => {
+						match condexpr.accept(self) {
+							Ok(condexpr) => match condexpr {
+								ExprNode(condexpr) => match stmt.accept(self) {
+									Ok(bodystmt) => match bodystmt {
+										StmtNode(bodystmt) => match bodystmt {
+											Block(bodyblock) => Ok(StmtNode(While(decaf::WhileStmt {
+												condexpr,
+												bodyblock,
+											}))),
+											_ => Err(E_BLOCK_STMT_NOT_FOUND)
+										},
+										_ => Err(E_STMT_NODE_NOT_FOUND)
+									}
+									Err(e) => Err(e)
+								}
+								_ => Err(E_EXPR_NODE_NOT_FOUND)
+							}
+							Err(e) => Err(e)
+						}
+					}
+					ReturnStmt(retexpr) => {
+						use decaf::Scope::*;
+						match retexpr {
+							None => {
+								// Check if return type is void
+								match self.get_top_most_method_scope() {
+									Some(MethodScope(method)) => {
+										if let VoidTy = method.return_ty.borrow().base {
+											Ok(StmtNode(Return(decaf::ReturnStmt {
+												expr: None,
+											})))
+										} else {
+											Err(E_UNMATCHED_RETURN_TYPE)
+										}
+									}
+									_ => Err(E_RETURN_IN_NON_METHOD_SCOPE)
+								}
+							}
+							Some(retexpr) => match retexpr.accept(self) {
+								Ok(retexpr) => match retexpr {
+									ExprNode(retexpr) => {
+										let ret_ty = retexpr.get_type();
+										match self.get_top_most_method_scope() {
+											Some(MethodScope(method)) => {
+												if ret_ty.is_compatible_with(&method.return_ty.borrow()) {
+													Ok(StmtNode(Return(decaf::ReturnStmt {
+														expr: Some(retexpr),
+													})))
+												} else {
+													Err(E_UNMATCHED_RETURN_TYPE)
+												}
+											}
+											_ => Err(E_RETURN_IN_NON_METHOD_SCOPE)
+										}
+									}
+								},
+								Err(e) => Err(e)
+							}
+						}
+					}
+					ContinueStmt => {
+						use decaf::Scope::*;
+						// Check if we are in a loop
+						match self.get_top_most_while_scope() {
+							Some(WhileScope(whilestmt)) => {
+								Ok(StmtNode(Continue(decaf::ContinueStmt {
+									lup: whilestmt.clone(),
+								})))
+							}
+							None => Err(E_CONTINUE_NOT_IN_LOOP)
+						}
+					}
+					BreakStmt => {
+						use decaf::Scope::*;
+						// Check if we are in a loop
+						match self.get_top_most_while_scope() {
+							Some(WhileScope(whilestmt)) => {
+								Ok(StmtNode(Break(decaf::BreakStmt {
+									lup: whilestmt.clone(),
+								})))
+							}
+							None => Err(E_BREAK_NOT_IN_LOOP)
+						}
+					}
+					SuperStmt(args) => {
+						// Super constructor call
+					}
+					BlockStmt(block) => {}
+				}
+			}
+		}
+
+		Ok(Normal)
+	}
 
 	fn visit_formalarg(&mut self, farg: &lnp::past::FormalArg) -> Self::Result {
 		Ok(BuilderResult::Normal)
@@ -1047,9 +1355,7 @@ impl Visitor for DecafTreeBuilder {
 		Ok(BuilderResult::Normal)
 	}
 
-	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
+
 
 	fn visit_declare_stmt(&mut self, ty: &lnp::past::Type,
 						  vardecls: &Vec<lnp::past::VarDeclarator>) -> Self::Result {

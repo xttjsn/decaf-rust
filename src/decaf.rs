@@ -183,6 +183,7 @@ pub trait Value {
 	fn addressable(&self) -> bool;
 }
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct Variable {
 	pub name: String,
 	pub ty: Type,
@@ -193,6 +194,74 @@ impl Value for Variable {
 	fn addressable(&self) -> bool {
 		true
 	}
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Stmt {
+	Declare(DeclareStmt),
+	If(IfStmt),
+	IfElse(IfElseStmt),
+	Expr(ExprStmt),
+	While(WhileStmt),
+	Return(ReturnStmt),
+	Continue(ContinueStmt),
+	Break(BreakStmt),
+	Super(SuperStmt),
+	Block(BlockStmt),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct DeclareStmt {
+	name: String,
+	ty: Type,
+	init_expr: Option<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct IfStmt {
+	cond: Expr,
+	thenblock: BlockStmt,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct IfElseStmt {
+	cond: Expr,
+	thenblock: BlockStmt,
+	elseblock: BlockStmt,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ExprStmt {
+	expr: Expr,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct WhileStmt {
+	condexpr: Expr,
+	bodyblock: BlockStmt
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ReturnStmt {
+	expr: Option<Expr>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContinueStmt {
+	lup: Rc<WhileStmt>
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct BreakStmt {
+	lup: Rc<WhileStmt>
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct SuperStmt {
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct BlockStmt {
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -347,7 +416,8 @@ pub enum Scope {
 	ClassScope(Rc<Class>),
 	CtorScope(Rc<Ctor>),
 	MethodScope(Rc<Method>),
-	BlockScope(Rc<Block>),
+	BlockScope(Rc<BlockStmt>),
+	WhileScope(Rc<WhileStmt>),
 	GlobalScope,
 }
 
