@@ -1334,6 +1334,27 @@ impl Visitor for DecafTreeBuilder {
 					}
 					SuperStmt(args) => {
 						// Super constructor call
+						match self.get_top_most_ctor_scope() {
+							Some(_) => {
+								// Check the closest ancestor that has the signature
+								match args.accept(self) {
+									Ok(VecExpr(args_expr)) => {
+										match self.get_top_most_class_scope() {
+											Some(cls) => {
+												match cls.get_top_most_compatible_ctor_and_super(args_expr) {
+													Some((sup_ctor, sup)) => Ok(StmtNode(Super(decaf::SuperStmt {
+
+													})))
+												}
+											}
+											None => Err(E_CALLING_CTOR_OUTSIDE_CLASS)
+										}
+									}
+									_ => Err(E_VEC_EXPR_NOT_FOUND)
+								}
+							}
+							None => Err(E_CALLING_SUPER_CTOR_OUTSIDE_CTOR)
+						}
 					}
 					BlockStmt(block) => {}
 				}
@@ -1752,24 +1773,7 @@ impl Visitor for DecafTreeBuilder {
 		}
 		Ok(BuilderResult::Normal)
 	}
-	fn visit_new_obj(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_call_self_method(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_call_method(&self, prim: &lnp::past::Primary, name: &String, args: &lnp::past::ActualArgs) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_call_super(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_array_expr(&self, expr: &lnp::past::ArrayExpr) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_field_expr(&self, expr: &lnp::past::FieldExpr) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
+
 	fn visit_actural_args(&self, args: &lnp::past::ActualArgs) -> Self::Result {
 		use self::BuilderResult::*;
 		let mut res = vec![];

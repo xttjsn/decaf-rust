@@ -248,12 +248,12 @@ pub struct ReturnStmt {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContinueStmt {
-	lup: Rc<WhileStmt>
+	lup: Rc<WhileStmt> // loop
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BreakStmt {
-	lup: Rc<WhileStmt>
+	lup: Rc<WhileStmt> // loop
 }
 
 #[derive(Debug, PartialEq, Clone)]
