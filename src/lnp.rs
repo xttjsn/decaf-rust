@@ -1,9 +1,9 @@
 extern crate plex;
-use std::fmt;
 
 pub mod lexer {
     use plex::lexer;
 	use std::str::FromStr;
+	use std::fmt;
 
     #[derive(Debug, Clone)]
     pub enum Token {
@@ -196,8 +196,8 @@ pub mod lexer {
 
 	impl fmt::Display for Span {
 		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-			use self::Region::*;
 			write!(f, "{},{}", self.lo, self.hi);
+			Ok(())
 		}
 	}
 
@@ -399,7 +399,7 @@ pub mod past {
 		pub op: BinOp,
 	}
 
-	#[derive(Debug, Clone)]
+	#[derive(Debug, PartialEq, Clone)]
 	pub enum BinOp {
 		AssignOp,
 		LogicalOrOp,
@@ -418,13 +418,12 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
-	pub struct
-	UnaryOp {
+	pub struct UnaryOp {
 		pub span: Span,
 		pub op: UnOp,
 	}
 
-	#[derive(Debug, Clone)]
+	#[derive(Debug, PartialEq, Clone)]
 	pub enum UnOp {
 		PlusUOp,
 		MinusUOp,

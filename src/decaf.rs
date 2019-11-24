@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use std::cell::RefCell;
 use crate::lnp;
 use crate::lnp::past::{BinOp, UnOp, Litr};
+use crate::decaf::TypeBase::VoidTy;
+use crate::lnp::past::Litr::Bool;
 
 pub enum SemanticError{
 	ClassRedefinition(String),
@@ -37,6 +39,14 @@ pub struct Type {
 	pub array_lvl: u32,
 }
 
+impl Type {
+	fn is_compatible_with(&self, rhs: &Type) -> bool {
+		match self.array_lvl == rhs.array_lvl {
+
+		}
+	}
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TypeBase {
 	UnknownTy(String),
@@ -44,6 +54,7 @@ pub enum TypeBase {
 	IntTy,
 	CharTy,
 	VoidTy,
+	NULLTy,
 	ClassTy(Rc<Class>),
 	MethodTy(Rc<Method>),
 }
@@ -56,6 +67,7 @@ pub struct Method {
 	pub stat: RefCell<bool>,
 	pub return_ty: RefCell<Rc<Type>>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>,
+	pub body: RefCell<Option<Rc<BlockStmt>>>,
 }
 
 impl Method {
@@ -72,6 +84,7 @@ impl Method {
 			stat: RefCell::new(false),
 			return_ty: RefCell::new(unknowncls.clone()),
 			args: RefCell::new(vec![]),
+			body: RefCell::new(None),
 		}
 	}
 
@@ -181,6 +194,7 @@ pub struct Block {
 
 pub trait Value {
 	fn addressable(&self) -> bool;
+	fn get_type(&self) -> Type;
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -193,6 +207,10 @@ pub struct Variable {
 impl Value for Variable {
 	fn addressable(&self) -> bool {
 		true
+	}
+
+	fn get_type(&self) -> Type {
+		self.ty.clone()
 	}
 }
 
@@ -207,7 +225,7 @@ pub enum Stmt {
 	Continue(ContinueStmt),
 	Break(BreakStmt),
 	Super(SuperStmt),
-	Block(BlockStmt),
+	Block(Rc<BlockStmt>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -279,7 +297,7 @@ pub enum Expr {
 	BinCmp(BinCmpExpr),
 	CreateArray(CreateArrayExpr),
 	Literal(LiteralExpr),
-	This,
+	This(ThisExpr),
 	NULL,
 	CreateObj(CreateObjExpr),
 	MethodCall(MethodCallExpr),
@@ -303,7 +321,7 @@ impl Value for Expr {
 			BinCmp(_) => false,
 			CreateArray(_) => false,
 			Literal(_) => false,
-			This => true,
+			This(_) => true,
 			NULL => false,
 			CreateObj(_) => false,
 			StaticMethodCall(_) => false,
@@ -312,6 +330,55 @@ impl Value for Expr {
 			ArrayAccess(_) => true,
 			FieldAccess(_)=> true,
 			Variable(_) => true,
+		}
+	}
+
+	fn get_type(&self) -> Type {
+		use Expr::*;
+		use TypeBase::*;
+		use LiteralExpr::*;
+		// Perform no checks
+		match self {
+			Assign(_) => Type {base: VoidTy, array_lvl: 0},
+			BinArith(_) => Type {base: IntTy, array_lvl: 0},
+			UnArith(_) => Type {base: IntTy, array_lvl: 0},
+			BinLogical(_) => Type {base: BoolTy, array_lvl: 0},
+			UnNot(_) => Type {base: BoolTy, array_lvl: 0},
+			BinCmp(_) => Type {base: BoolTy, array_lvl: 0},
+			CreateArray(expr) => Type {base: expr.ty.clone(), array_lvl: expr.dims.len() as u32},
+			Literal(expr) => match expr {
+				IntLiteral(_) => Type {base: IntTy, array_lvl: 0},
+				BoolLiteral(_) => Type {base: BoolTy, array_lvl: 0},
+				CharLiteral(_) => Type {base: CharTy, array_lvl: 0},
+				StrLiteral(_) => panic!("not implemented"),
+			},
+			This(expr) => Type {base: ClassTy(expr.cls.clone()), array_lvl: 0},
+			NULL => Type {base: NULLTy, array_lvl: 0},
+			CreateObj(expr) => Type {base: ClassTy(expr.cls.clone()), array_lvl: 0},
+			StaticMethodCall(expr) => Type {
+				base: expr.method.return_ty.borrow().base.clone(),
+				array_lvl: expr.method.return_ty.borrow().array_lvl,
+			},
+			MethodCall(expr) => Type {
+				base: expr.method.return_ty.borrow().base.clone(),
+				array_lvl: expr.method.return_ty.borrow().array_lvl,
+			},
+			SuperCall(expr) => Type {
+				base: expr.method.return_ty.borrow().base.clone(),
+				array_lvl: expr.method.return_ty.borrow().array_lvl,
+			},
+			ArrayAccess(expr) => {
+				let ty = expr.var.get_type();
+				if ty.array_lvl < 1 {
+					panic!("ArrayAccess with bad array_lvl: {}", ty.array_lvl);
+				}
+				Type {base: ty.base, array_lvl: ty.array_lvl - 1}
+			}
+			FieldAccess(expr) => Type {
+				base: expr.fld.ty.borrow().base.clone(),
+				array_lvl: expr.fld.ty.borrow().array_lvl,
+			},
+			Variable(expr) => expr.var.ty.clone()
 		}
 	}
 }
@@ -369,6 +436,11 @@ pub enum LiteralExpr {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ThisExpr {
+	cls: Rc<Class>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct CreateObjExpr {
 	cls: Rc<Class>,
 	ctor: Rc<Ctor>,
@@ -377,7 +449,7 @@ pub struct CreateObjExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct MethodCallExpr {
-	var: Expr,
+	var: Box<Expr>,
 	cls: Rc<Class>,
 	method: Rc<Method>,
 	args: Vec<Expr>,
@@ -400,13 +472,13 @@ pub struct SuperCallExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ArrayAccessExpr {
-	var: Expr,
-	idx: Expr,
+	var: Box<Expr>,
+	idx: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FieldAccessExpr {
-	var: Expr,
+	var: Box<Expr>,
 	cls: Rc<Class>,
 	fld: Rc<Field>,
 }
