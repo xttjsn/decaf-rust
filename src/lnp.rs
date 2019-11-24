@@ -418,7 +418,8 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
-	pub struct UnaryOp {
+	pub struct
+	UnaryOp {
 		pub span: Span,
 		pub op: UnOp,
 	}

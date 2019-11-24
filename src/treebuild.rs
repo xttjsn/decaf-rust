@@ -4,6 +4,7 @@ use crate::decaf::{Value};
 use std::rc::Rc;
 use std::collections::BTreeMap;
 use crate::lnp::past::{UnaryOp, Litr, Statement};
+use crate::treebuild::Scope::BlockScope;
 
 pub trait Visitor {
 	type Result;
@@ -12,32 +13,11 @@ pub trait Visitor {
 	fn visit_class(&mut self, cls: &lnp::past::ClassNode) -> Self::Result;
 	fn visit_field(&mut self, fld: &lnp::past::Field) -> Self::Result;
 	fn visit_method(&mut self, mthd: &lnp::past::Method) -> Self::Result;
-	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result;
-	fn visit_formalarg(&mut self, farg: &lnp::past::FormalArg) -> Self::Result;
-	fn visit_type(&mut self, ty: &lnp::past::Type) -> Self::Result;
-	fn visit_vardecl(&mut self, vardecl: &lnp::past::VarDeclarator) -> Self::Result;
 	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result;
-	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result;
+	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result;
 	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result;
-	fn visit_declare_stmt(&mut self, ty: &lnp::past::Type,
-						  vardecls: &Vec<lnp::past::VarDeclarator>) -> Self::Result;
-	fn visit_if_stmt(&self, condexpr: &lnp::past::Expression,
-					 thenstmt: &Box<lnp::past::Statement>) -> Self::Result;
-	fn visit_if_else_stmt(&self, condexpr: &lnp::past::Expression,
-						  thenstmt: &Box<lnp::past::Statement>,
-						  elsestmt: &Box<lnp::past::Statement>) -> Self::Result;
-	fn visit_while_stmt(&self, condexpr: &lnp::past::Expression,
-						loopstmt: &Box<lnp::past::Statement>) -> Self::Result;
-	fn visit_super_stmt(&self, stmt: &lnp::past::Statement) -> Self::Result;
 	fn visit_primary(&self, prim: &lnp::past::Primary) -> Self::Result;
-	fn visit_naexpr(&self, expr: &lnp::past::NewArrayExpr) -> Self::Result;
 	fn visit_nnaexpr(&self, expr: &lnp::past::NNAExpr) -> Self::Result;
-	fn visit_new_obj(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result;
-	fn visit_call_self_method(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result;
-	fn visit_call_method(&self, prim: &lnp::past::Primary, name: &String, args: &lnp::past::ActualArgs) -> Self::Result;
-	fn visit_call_super(&self, name: &String, args: &lnp::past::ActualArgs) -> Self::Result;
-	fn visit_array_expr(&self, expr: &lnp::past::ArrayExpr) -> Self::Result;
-	fn visit_field_expr(&self, expr: &lnp::past::FieldExpr) -> Self::Result;
 	fn visit_actural_args(&self, args: &lnp::past::ActualArgs) -> Self::Result;
 }
 
@@ -73,7 +53,7 @@ impl Visitable for lnp::past::Ctor {
 	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result {
 		visitor.visit_ctor(self)
 	}
-}
+}p
 
 impl Visitable for lnp::past::Block {
 	fn accept<V: Visitor>(&self, visitor: &mut V) -> V::Result {
@@ -1089,25 +1069,6 @@ impl Visitor for DecafTreeBuilder {
 		Ok(Normal)
 	}
 
-	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use crate::decaf::Scope::*;
-		match self.state {
-			First => panic!("block should not be visited in the first pass"),
-			Second => {
-				// Create a new block
-				let block_node = Rc::new(decaf::Block {});
-				self.scopes.push(BlockScope(block_node));
-				for stmt in block.stmts.iter() {
-					stmt.accept(self)?;
-				}
-
-			}
-		}
-		Ok(Normal)
-	}
-
 	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result {
 		use self::BuilderResult::*;
 		use self::BuilderState::*;
@@ -1343,7 +1304,9 @@ impl Visitor for DecafTreeBuilder {
 											Some(cls) => {
 												match cls.get_top_most_compatible_ctor_and_super(args_expr) {
 													Some((sup_ctor, sup)) => Ok(StmtNode(Super(decaf::SuperStmt {
-
+														sup,
+														sup_ctor,
+														args: args_expr,
 													})))
 												}
 											}
@@ -1356,7 +1319,31 @@ impl Visitor for DecafTreeBuilder {
 							None => Err(E_CALLING_SUPER_CTOR_OUTSIDE_CTOR)
 						}
 					}
-					BlockStmt(block) => {}
+					BlockStmt(block) => {
+						// Create a new scope
+						let blockstmt = Rc::new(decaf::BlockStmt {
+							vartbl: RefCell::new(Vec::new()),
+							stmts: RefCell::new(Vec::new()),
+						});
+
+						self.scopes.push(BlockScope(blockstmt.clone()));
+
+						for stmt in blocks.stmts.iter() {
+							match x.accept(self) {
+								Ok(StmtNode(stmt)) => {
+									blockstmt.stmts.borrow_mut().push(stmt);
+								}
+								Ok(_) => {
+									return Err(E_STMT_NODE_NOT_FOUND);
+								}
+								Err(e) => {
+									return Err(e);
+								}
+							}
+						}
+
+						Ok(StmtNode(Block(blockstmt)));
+					}
 				}
 			}
 		}
@@ -1364,40 +1351,6 @@ impl Visitor for DecafTreeBuilder {
 		Ok(Normal)
 	}
 
-	fn visit_formalarg(&mut self, farg: &lnp::past::FormalArg) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-
-	fn visit_type(&mut self, ty: &lnp::past::Type) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-
-	fn visit_vardecl(&mut self, vardecl: &lnp::past::VarDeclarator) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-
-
-
-	fn visit_declare_stmt(&mut self, ty: &lnp::past::Type,
-						  vardecls: &Vec<lnp::past::VarDeclarator>) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_if_stmt(&self, condexpr: &lnp::past::Expression,
-					 thenstmt: &Box<lnp::past::Statement>) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_if_else_stmt(&self, condexpr: &lnp::past::Expression,
-						  thenstmt: &Box<lnp::past::Statement>,
-						  elsestmt: &Box<lnp::past::Statement>) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_while_stmt(&self, condexpr: &lnp::past::Expression,
-						loopstmt: &Box<lnp::past::Statement>) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
-	fn visit_super_stmt(&self, stmt: &lnp::past::Statement) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
 	fn visit_primary(&self, prim: &lnp::past::Primary) -> Self::Result {
 		use crate::decaf::SemanticError::*;
 		use self::BuilderState::*;
@@ -1495,9 +1448,7 @@ impl Visitor for DecafTreeBuilder {
 		}
 		Ok(BuilderResult::Normal)
 	}
-	fn visit_naexpr(&self, expr: &lnp::past::NewArrayExpr) -> Self::Result {
-		Ok(BuilderResult::Normal)
-	}
+
 	fn visit_nnaexpr(&self, nnaexpr: &lnp::past::NNAExpr) -> Self::Result {
 		use crate::decaf::SemanticError::*;
 		use self::BuilderState::*;

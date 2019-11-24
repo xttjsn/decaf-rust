@@ -258,10 +258,15 @@ pub struct BreakStmt {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SuperStmt {
+	sup: Rc<Class>,
+	sup_ctor: Rc<Ctor>,
+	args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BlockStmt {
+	vartbl: RefCell<Vec<Variable>>,
+	stmts: RefCell<Vec<Stmt>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
