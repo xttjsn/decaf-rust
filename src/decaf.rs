@@ -40,9 +40,62 @@ pub struct Type {
 }
 
 impl Type {
-	fn is_compatible_with(&self, rhs: &Type) -> bool {
+	pub fn is_compatible_with(&self, rhs: &Type) -> bool {
+		use TypeBase::*;
 		match self.array_lvl == rhs.array_lvl {
+			false => false,
+			true => {
+				match (&self.base, &rhs.base) {
+					(UnknownTy(_), _) | (_, (UnknownTy(_))) => false,
+					_ => {
+						match &self.base == &rhs.base {
+							true => true,
+							false => {
+								match (&self.base, &rhs.base) {
+									(ClassTy(_), NULLTy) | (NULLTy, ClassTy(_)) => true,
+									_ => false
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
+	pub fn is_arith_type(&self) -> bool {
+		use TypeBase::*;
+		if self.array_lvl == 0 {
+			match &self.base {
+				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				IntTy => false,
+			}
+		} else {
+			false
+		}
+	}
+
+	pub fn is_logical_type(&self) -> bool {
+		use TypeBase::*;
+		if self.array_lvl == 0 {
+			match &self.base {
+				UnknownTy(_) | IntTy | CharTy | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				BoolTy => true,
+			}
+		} else {
+			false
+		}
+	}
+
+	pub fn is_cmp_type(&self) -> bool {
+		use TypeBase::*;
+		if self.array_lvl == 0 {
+			match &self.base {
+				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				IntTy | CharTy | BoolTy => true,
+			}
+		} else {
+			false
 		}
 	}
 }
@@ -137,7 +190,8 @@ impl Method {
 pub struct Ctor {
 	pub cls: Rc<Class>,
 	pub vis: RefCell<Visibility>,
-	pub args: RefCell<Vec<(String, Rc<Type>)>>
+	pub args: RefCell<Vec<(String, Rc<Type>)>>,
+	pub body: RefCell<Option<Rc<BlockStmt>>>,
 }
 
 impl Ctor {
@@ -146,6 +200,7 @@ impl Ctor {
 			cls: cls,
 			vis: RefCell::new(Visibility::Pub),
 			args: RefCell::new(vec![]),
+			body: RefCell::new(None),
 		}
 	}
 
@@ -226,65 +281,66 @@ pub enum Stmt {
 	Break(BreakStmt),
 	Super(SuperStmt),
 	Block(Rc<BlockStmt>),
+	NOP,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct DeclareStmt {
-	name: String,
-	ty: Type,
-	init_expr: Option<Expr>,
+	pub name: String,
+	pub ty: Type,
+	pub init_expr: Option<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct IfStmt {
-	cond: Expr,
-	thenblock: BlockStmt,
+	pub cond: Expr,
+	pub thenblock: Rc<BlockStmt>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct IfElseStmt {
-	cond: Expr,
-	thenblock: BlockStmt,
-	elseblock: BlockStmt,
+	pub cond: Expr,
+	pub thenblock: Rc<BlockStmt>,
+	pub elseblock: Rc<BlockStmt>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ExprStmt {
-	expr: Expr,
+	pub expr: Expr,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhileStmt {
-	condexpr: Expr,
-	bodyblock: BlockStmt
+	pub condexpr: Expr,
+	pub bodyblock: Rc<BlockStmt>
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ReturnStmt {
-	expr: Option<Expr>,
+	pub expr: Option<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ContinueStmt {
-	lup: Rc<WhileStmt> // loop
+	pub lup: Rc<WhileStmt> // loop
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BreakStmt {
-	lup: Rc<WhileStmt> // loop
+	pub lup: Rc<WhileStmt> // loop
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SuperStmt {
-	sup: Rc<Class>,
-	sup_ctor: Rc<Ctor>,
-	args: Vec<Expr>,
+	pub sup: Rc<Class>,
+	pub sup_ctor: Rc<Ctor>,
+	pub args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BlockStmt {
-	vartbl: RefCell<Vec<Variable>>,
-	stmts: RefCell<Vec<Stmt>>,
+	pub vartbl: RefCell<Vec<Rc<Variable>>>,
+	pub stmts: RefCell<Vec<Stmt>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -306,6 +362,7 @@ pub enum Expr {
 	ArrayAccess(ArrayAccessExpr),
 	FieldAccess(FieldAccessExpr),
 	Variable(VariableExpr),
+	ClassId(ClassIdExpr),
 }
 
 impl Value for Expr {
@@ -330,6 +387,7 @@ impl Value for Expr {
 			ArrayAccess(_) => true,
 			FieldAccess(_)=> true,
 			Variable(_) => true,
+			ClassId(_) => false,
 		}
 	}
 
@@ -378,58 +436,59 @@ impl Value for Expr {
 				base: expr.fld.ty.borrow().base.clone(),
 				array_lvl: expr.fld.ty.borrow().array_lvl,
 			},
-			Variable(expr) => expr.var.ty.clone()
+			Variable(expr) => expr.var.ty.clone(),
+			ClassId(_) => panic!("ClassId has no type"),
 		}
 	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AssignExpr {
-	lhs: Box<Expr>,
-	rhs: Box<Expr>,
+	pub lhs: Box<Expr>,
+	pub rhs: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BinArithExpr {
-	lhs: Box<Expr>,
-	rhs: Box<Expr>,
-	op: BinOp,
+	pub lhs: Box<Expr>,
+	pub rhs: Box<Expr>,
+	pub op: BinOp,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct UnArithExpr {
-	rhs: Box<Expr>,
-	op: UnOp,
+	pub rhs: Box<Expr>,
+	pub op: UnOp,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct UnNotExpr {
-	rhs: Box<Expr>,
+	pub rhs: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BinLogicalExpr {
-	lhs: Box<Expr>,
-	rhs: Box<Expr>,
-	op: BinOp,
+	pub lhs: Box<Expr>,
+	pub rhs: Box<Expr>,
+	pub op: BinOp,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BinCmpExpr {
-	lhs: Box<Expr>,
-	rhs: Box<Expr>,
-	op: BinOp,
+	pub lhs: Box<Expr>,
+	pub rhs: Box<Expr>,
+	pub op: BinOp,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateArrayExpr {
-	ty: TypeBase,
-	dims: Vec<Expr>,
+	pub ty: TypeBase,
+	pub dims: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum LiteralExpr {
-	IntLiteral(i32),
+	IntLiteral(i64),
 	BoolLiteral(bool),
 	CharLiteral(char),
 	StrLiteral(String),
@@ -437,55 +496,58 @@ pub enum LiteralExpr {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ThisExpr {
-	cls: Rc<Class>,
+	pub cls: Rc<Class>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateObjExpr {
-	cls: Rc<Class>,
-	ctor: Rc<Ctor>,
-	args: Vec<Expr>,
+	pub cls: Rc<Class>,
+	pub ctor: Rc<Ctor>,
+	pub args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct MethodCallExpr {
-	var: Box<Expr>,
-	cls: Rc<Class>,
-	method: Rc<Method>,
-	args: Vec<Expr>,
+	pub var: Box<Expr>,
+	pub method: Rc<Method>,
+	pub args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct StaticMethodCallExpr {
-	cls: Rc<Class>,
-	method: Rc<Method>,
-	args: Vec<Expr>,
+	pub cls: Rc<Class>,
+	pub method: Rc<Method>,
+	pub args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SuperCallExpr {
-	cls: Rc<Class>,
-	sup: Rc<Class>,
-	method: Rc<Method>,
-	args: Vec<Expr>,
+	pub cls: Rc<Class>,
+	pub method: Rc<Method>,
+	pub args: Vec<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ArrayAccessExpr {
-	var: Box<Expr>,
-	idx: Box<Expr>,
+	pub var: Box<Expr>,
+	pub idx: Box<Expr>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct FieldAccessExpr {
-	var: Box<Expr>,
-	cls: Rc<Class>,
-	fld: Rc<Field>,
+	pub var: Box<Expr>,
+	pub cls: Rc<Class>,
+	pub fld: Rc<Field>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct VariableExpr {
-	var: Rc<Variable>,
+	pub var: Rc<Variable>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ClassIdExpr {
+	pub cls: Rc<Class>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -496,6 +558,41 @@ pub enum Scope {
 	BlockScope(Rc<BlockStmt>),
 	WhileScope(Rc<WhileStmt>),
 	GlobalScope,
+}
+
+impl Scope {
+	pub fn variable_lookup(&self, name: &str) -> Option<Rc<Variable>> {
+		use Scope::*;
+		match self {
+			ClassScope(_) | CtorScope(_) | MethodScope(_) | WhileScope(_) | GlobalScope => None,
+			BlockScope(blk) => {
+				for v in blk.vartbl.borrow().iter() {
+					if v.name == name {
+						return Some(v.clone());
+					}
+				}
+				None
+			}
+		}
+	}
+
+	pub fn variable_add(&self, name: String, ty: Type) {
+		use Scope::*;
+		match self {
+			ClassScope(_) | CtorScope(_) | MethodScope(_) | WhileScope(_) | GlobalScope =>
+				panic!("variable_add is supported only for block scope"),
+			BlockScope(blk) => {
+				if blk.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
+					panic!("variable {:?} is already defined", name)
+				}
+				let var = Rc::new(Variable {
+					name,
+					ty,
+				});
+				blk.vartbl.borrow_mut().push(var);
+			}
+		}
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -699,6 +796,246 @@ impl Class {
 					}
 				}
 			}
+		}
+	}
+
+	pub fn get_ctor_by_signature(&self, args: &Vec<(String, TypeBase, u32)>) -> Option<Rc<Ctor>> {
+		let go = |ctors: &Vec<Rc<Ctor>>| {
+			for ctor in ctors.iter() {
+				for (arga, argb) in ctor.args.borrow().iter().zip(args.iter()) {
+					if arga.0 != argb.0 || arga.1.base != argb.1 || arga.1.array_lvl != argb.2 {
+						continue;
+					}
+				}
+				return Some(ctor.clone());
+			}
+			None
+		};
+		match go(&self.pub_ctors.borrow()) {
+			Some(m) => Some(m),
+			None => match go(&self.prot_ctors.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.priv_ctors.borrow()) {
+					Some(m) => Some(m),
+					None => None,
+				}
+			}
+		}
+	}
+
+	pub fn get_compatible_super_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+		let go = |ctors: &Vec<Rc<Ctor>>| {
+			for ctor in ctors.iter() {
+				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(ctor.clone());
+			}
+			None
+		};
+
+		match &*self.sup.borrow() {
+			None => None,
+			Some(sup_cls) => {
+				match go(&sup_cls.pub_ctors.borrow()) {
+					Some(m) => Some(m),
+					None => match go(&sup_cls.prot_ctors.borrow()) {
+						Some(m) => Some(m),
+						None => None,
+					}
+				}
+			}
+		}
+	}
+
+	pub fn get_compatible_level0_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+		let go = |ctors: &Vec<Rc<Ctor>>| {
+			for ctor in ctors.iter() {
+				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(ctor.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_ctors.borrow()) {
+			Some(m) => Some(m),
+			None => match go(&self.prot_ctors.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.priv_ctors.borrow()) {
+					Some(m) => Some(m),
+					None => None,
+				},
+			}
+		}
+	}
+
+	pub fn get_compatible_level1_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+		let go = |ctors: &Vec<Rc<Ctor>>| {
+			for ctor in ctors.iter() {
+				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(ctor.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_ctors.borrow()) {
+			Some(m) => Some(m),
+			None => None
+		}
+	}
+
+	pub fn get_compatible_level0_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_methods.borrow()) {
+			Some(m) => Some(m),
+			None => match go(&self.prot_methods.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.priv_methods.borrow()) {
+					Some(m) => Some(m),
+					None => None,
+				}
+			}
+		}
+	}
+
+	pub fn get_compatible_level1_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_methods.borrow()) {
+			Some(m) => Some(m),
+			None => None,
+		}
+	}
+
+	pub fn get_compatible_level0_static_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_static_methods.borrow()) {
+			Some(m) => Some(m),
+			None => match go(&self.prot_static_methods.borrow()) {
+				Some(m) => Some(m),
+				None => match go(&self.priv_static_methods.borrow()) {
+					Some(m) => Some(m),
+					None => None,
+				}
+			}
+		}
+	}
+
+	pub fn get_compatible_level1_static_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match go(&self.pub_static_methods.borrow()) {
+			Some(m) => Some(m),
+			None => None,
+		}
+	}
+
+	pub fn get_compatible_level0_super_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			for method in methods.iter() {
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+						continue;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match &*self.sup.borrow() {
+			None => None,
+			Some(sup_cls) => {
+				match go(&sup_cls.pub_methods.borrow()) {
+					Some(m) => Some(m),
+					None => match go(&sup_cls.prot_methods.borrow()) {
+						Some(m) => Some(m),
+						None => None,
+					}
+				}
+			}
+		}
+	}
+
+	pub fn get_level0_field_by_name(&self, name: &str) -> Option<Rc<Field>> {
+		match self.pub_fields.borrow().iter().find(|f| f.name == name) {
+			Some(f) => Some(f.clone()),
+			None => match self.prot_fields.borrow().iter().find(|f| f.name == name) {
+				Some(f) => Some(f.clone()),
+				None => None
+			}
+		}
+	}
+
+	pub fn get_level1_field_by_name(&self, name: &str) -> Option<Rc<Field>> {
+		match self.pub_fields.borrow().iter().find(|f| f.name == name) {
+			Some(f) => Some(f.clone()),
+			None => None,
 		}
 	}
 }
