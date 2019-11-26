@@ -14,6 +14,7 @@ mod tests {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_visit_class() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -64,6 +65,7 @@ class Main {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_normal_declaration() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -89,6 +91,7 @@ class Bar extends Foo {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_forward_declaration() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -115,6 +118,7 @@ class Foo {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_three_layer_declaration() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -148,6 +152,7 @@ class Foo {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_mixed_order_declaration() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -181,6 +186,7 @@ class Foo {
 
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_methods_simple_inheritance() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -209,6 +215,7 @@ class Foo {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_methods_overwrite() {
 		let mut builder = DecafTreeBuilder::new();
 
@@ -237,6 +244,7 @@ class Foo {
 	}
 
 	#[test]
+	#[allow(unused_must_use)]
 	fn test_methods_visibility() {
 		let mut builder = DecafTreeBuilder::new();
 

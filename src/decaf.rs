@@ -1,30 +1,6 @@
 use std::rc::Rc;
-use std::cmp::Ordering;
-use std::fmt;
-use std::collections::BTreeSet;
 use std::cell::RefCell;
-use crate::lnp;
-use crate::lnp::past::{BinOp, UnOp, Litr};
-use crate::decaf::TypeBase::VoidTy;
-use crate::lnp::past::Litr::Bool;
-
-pub enum SemanticError{
-	ClassRedefinition(String),
-	BadImplementation(String),
-	InvalidModifier(lnp::lexer::Span)
-}
-
-impl fmt::Display for SemanticError {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		use self::SemanticError::*;
-		match self {
-			ClassRedefinition(cls_name) => write!(f, "redefinition of class {}", cls_name),
-			BadImplementation(why) => write!(f, "bad implementation: {}", why),
-			InvalidModifier(loc) => write!(f, "invalid modifier at {},{}", loc.lo, loc.hi),
-		}
-	}
-}
-
+use crate::lnp::past::{BinOp, UnOp};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
@@ -46,7 +22,7 @@ impl Type {
 			false => false,
 			true => {
 				match (&self.base, &rhs.base) {
-					(UnknownTy(_), _) | (_, (UnknownTy(_))) => false,
+					(UnknownTy(_), _) | (_, UnknownTy(_)) => false,
 					_ => {
 						match &self.base == &rhs.base {
 							true => true,
@@ -67,7 +43,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) => false,
 				IntTy => false,
 			}
 		} else {
@@ -79,7 +55,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_) | IntTy | CharTy | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				UnknownTy(_) | IntTy | CharTy | VoidTy | NULLTy | ClassTy(_) => false,
 				BoolTy => true,
 			}
 		} else {
@@ -91,7 +67,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) | MethodTy(_) => false,
+				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) => false,
 				IntTy | CharTy | BoolTy => true,
 			}
 		} else {
@@ -109,7 +85,6 @@ pub enum TypeBase {
 	VoidTy,
 	NULLTy,
 	ClassTy(Rc<Class>),
-	MethodTy(Rc<Method>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -143,14 +118,14 @@ impl Method {
 
 	pub fn add_arg(&self, arg_name: String, arg_ty: Rc<Type>) {
 		// Check name conflicts
-		if self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+		if self.args.borrow().iter().any(|(name, _ty)| name == &arg_name) {
 			panic!("argument name conflict in method")
 		}
 		self.args.borrow_mut().push((arg_name, arg_ty));
 	}
 
 	pub fn set_arg_type(&self, arg_name: String, arg_ty: Rc<Type>) {
-		if !self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+		if !self.args.borrow().iter().any(|(name, _ty)| name == &arg_name) {
 			panic!("argument not found in method")
 		}
 		self.args.replace_with(|v| v.into_iter().map(|(name, ty)| {
@@ -206,14 +181,14 @@ impl Ctor {
 
 	pub fn add_arg(&self, arg_name: String, arg_ty: Rc<Type>) {
 		// Check name conflicts
-		if self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+		if self.args.borrow().iter().any(|(name, _ty)| name == &arg_name) {
 			panic!("argument name conflict in method")
 		}
 		self.args.borrow_mut().push((arg_name, arg_ty));
 	}
 
 	pub fn set_arg_type(&self, arg_name: String, arg_ty: Rc<Type>) {
-		if !self.args.borrow().iter().any(|(name, ty)| name == &arg_name) {
+		if !self.args.borrow().iter().any(|(name, _ty)| name == &arg_name) {
 			panic!("argument not found in method")
 		}
 		self.args.replace_with(|v| v.into_iter().map(|(name, ty)| {
@@ -275,7 +250,7 @@ pub enum Stmt {
 	If(IfStmt),
 	IfElse(IfElseStmt),
 	Expr(ExprStmt),
-	While(WhileStmt),
+	While(Rc<WhileStmt>),
 	Return(ReturnStmt),
 	Continue(ContinueStmt),
 	Break(BreakStmt),
@@ -312,7 +287,7 @@ pub struct ExprStmt {
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhileStmt {
 	pub condexpr: Expr,
-	pub bodyblock: Rc<BlockStmt>
+	pub bodyblock: RefCell<Option<Rc<BlockStmt>>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -357,7 +332,6 @@ pub enum Expr {
 	NULL,
 	CreateObj(CreateObjExpr),
 	MethodCall(MethodCallExpr),
-	StaticMethodCall(StaticMethodCallExpr),
 	SuperCall(SuperCallExpr),
 	ArrayAccess(ArrayAccessExpr),
 	FieldAccess(FieldAccessExpr),
@@ -381,7 +355,6 @@ impl Value for Expr {
 			This(_) => true,
 			NULL => false,
 			CreateObj(_) => false,
-			StaticMethodCall(_) => false,
 			MethodCall(_) => false,
 			SuperCall(_) => false,
 			ArrayAccess(_) => true,
@@ -413,10 +386,6 @@ impl Value for Expr {
 			This(expr) => Type {base: ClassTy(expr.cls.clone()), array_lvl: 0},
 			NULL => Type {base: NULLTy, array_lvl: 0},
 			CreateObj(expr) => Type {base: ClassTy(expr.cls.clone()), array_lvl: 0},
-			StaticMethodCall(expr) => Type {
-				base: expr.method.return_ty.borrow().base.clone(),
-				array_lvl: expr.method.return_ty.borrow().array_lvl,
-			},
 			MethodCall(expr) => Type {
 				base: expr.method.return_ty.borrow().base.clone(),
 				array_lvl: expr.method.return_ty.borrow().array_lvl,
@@ -599,7 +568,7 @@ impl Scope {
 pub struct Field {
 	pub name: String,
 	pub ty: RefCell<Rc<Type>>,
-	pub init_expr: RefCell<Option<Rc<Expr>>>,
+	pub init_expr: RefCell<Option<Expr>>,
 }
 
 impl Field {
@@ -618,7 +587,7 @@ impl Field {
 		*self.ty.borrow_mut() = ty;
 	}
 
-	fn set_init_expr(&self, expr: Rc<Expr>) {
+	pub fn set_init_expr(&self, expr: Expr) {
 		*self.init_expr.borrow_mut() = Some(expr);
 	}
 }

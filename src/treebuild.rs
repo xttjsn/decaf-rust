@@ -1,10 +1,10 @@
 use crate::lnp;
 use crate::decaf;
-use crate::decaf::{Value, TypeBase};
-use std::rc::Rc;
-use std::fmt;
+use crate::decaf::Value;
 use std::collections::BTreeMap;
-use crate::lnp::past::{UnaryOp, Litr, Statement};
+use std::rc::Rc;
+use std::cell::RefCell;
+use crate::decaf::Scope::WhileScope;
 
 pub trait Visitor {
 	type Result;
@@ -89,46 +89,45 @@ impl Visitable for Vec<lnp::past::Dimension> {
 // Errors
 #[derive(Debug)]
 pub enum SemanticError {
-	E_EXPR_NODE_NOT_FOUND,
-	E_LHS_NOT_ADDRESSABLE,
-	E_EXPR_NOT_SUPPORT_ARITH_OP,
-	E_EXPR_NOT_SUPPORT_LOGICAL_OP,
-	E_EXPR_NOT_SUPPORT_CMP_OP,
-	E_EXPR_NOT_COMPATIBLE_TYPE,
-	E_VARIABLE_REDEFINITION,
-	E_BLOCK_STMT_NOT_FOUND,
-	E_STMT_OR_VEC_STMT_NOT_FOUND,
-	E_COND_NOT_LOGICAL_TYPE,
-	E_STMT_NODE_NOT_FOUND,
-	E_UNMATCHED_RETURN_TYPE,
-	E_RETURN_IN_NON_METHOD_SCOPE,
-	E_CONTINUE_NOT_IN_LOOP,
-	E_BREAK_NOT_IN_LOOP,
-	E_CALLING_CTOR_OUTSIDE_CLASS,
-	E_VEC_EXPR_NOT_FOUND,
-	E_CALLING_SUPER_CTOR_OUTSIDE_CTOR,
-	E_CLASS_NOT_DEFINED,
-	E_DIM_EXPR_NOT_ARITH_TYPE,
-	E_VOID_ARRAY,
-	E_VARIABLE_NOT_DEFINED,
-	E_NO_COMPATIBLE_CTOR,
-	E_NO_COMPATIBLE_METHOD,
-	E_ARRAY_TYPE_NOT_SUPPORT_METHOD_CALL,
-	E_NON_CLASS_TYPE_NOT_SUPPORT_METHOD_CALL,
-	E_SUPER_CALL_WITHOUT_CLASS,
-	E_ARRAY_ACCESS_ON_NONARRAY_TYPE,
-	E_NO_COMPATIBLE_FIELD,
-	E_ARRAY_TYPE_NO_FIELD,
-	E_PRIMITIVE_TYPE_NO_FIELD,
-	E_FIELD_ACCESS_WITHOUT_CLASS,
-	E_CLASS_REDEFINITION,
-	E_INVALID_MODIFIER,
-	E_THIS_IN_STATIC_METHOD,
-	E_THIS_WITHOUT_CLASS,
-	E_THIS_WITHOUT_METHOD,
-	E_THIS_NOT_FOUND,
-	E_METHOD_CALL_WITHOUT_CLASS,
-	E_UNKNOWN_IDENTIFIER,
+	EExprNodeNotFound,
+	ELhsNotAddressable,
+	EExprNotSupportArithOp,
+	EExprNotSupportLogicalOp,
+	EExprNotSupportCmpOp,
+	EExprNotCompatibleType,
+	EVariableRedefinition,
+	EBlockStmtNotFound,
+	EStmtOrVecStmtNotFound,
+	ECondNotLogicalType,
+	EStmtNodeNotFound,
+	EUnmatchedReturnType,
+	EReturnInNonMethodScope,
+	EContinueNotInLoop,
+	EBreakNotInLoop,
+	ECallingCtorOutsideClass,
+	EVecExprNotFound,
+	ECallingSuperCtorOutsideCtor,
+	EClassNotDefined,
+	EDimExprNotArithType,
+	EVoidArray,
+	ENoCompatibleCtor,
+	ENoCompatibleMethod,
+	EArrayTypeNotSupportMethodCall,
+	ENonClassTypeNotSupportMethodCall,
+	ESuperCallWithoutClass,
+	EArrayAccessOnNonArrayType,
+	ENoCompatibleField,
+	EArrayTypeNoField,
+	EPrimitiveTypeNoField,
+	EFieldAccessWithoutClass,
+	EClassRedefinition,
+	EInvalidModifier,
+	EThisInStaticMethod,
+	EThisWithoutClass,
+	EThisWithoutMethod,
+	EThisNotFound,
+	EMethodCallWithoutClass,
+	EUnknownIdentifier,
 }
 
 trait Normalize {
@@ -299,7 +298,6 @@ pub enum BuilderResult {
 	Normal,
 	ExprNode(decaf::Expr),
 	VecExpr(Vec<decaf::Expr>),
-	ClassNode(Rc<decaf::Class>),
     StmtNode(decaf::Stmt),
     VecStmt(Vec<decaf::Stmt>),
 }
@@ -314,6 +312,7 @@ pub struct DecafTreeBuilder {
 }
 
 impl DecafTreeBuilder {
+	#[allow(dead_code)]
 	pub fn new() -> Self {
 		DecafTreeBuilder {
 			state: BuilderState::First,
@@ -372,9 +371,6 @@ impl ASTBuilder for DecafTreeBuilder {
 						base: ClassTy(cls.clone()),
 						array_lvl: array_lvl,
 					}),
-					MethodTy(_) => {
-						panic!("bad field type: method");
-					}
 					NULLTy => Some(Type {
 						base: NULLTy,
 						array_lvl: array_lvl,
@@ -561,7 +557,7 @@ impl Visitor for DecafTreeBuilder {
 			BuilderState::First => {
 				// Check for class name conflicts
 				if let Some(_) = self.class_lookup(cls_node.name.clone()) {
-					return Err(E_CLASS_REDEFINITION);
+					return Err(EClassRedefinition);
 				} else {
 					// Create new class type
 					let new_class = Rc::new(decaf::Class::new(cls_node.name.clone()));
@@ -672,7 +668,7 @@ impl Visitor for DecafTreeBuilder {
 			First => {
 				// Normalize field
 				for norm_field in field_node.normalize() {
-					let (ty, array_lvl, field_name, init_expr) = norm_field;
+					let (ty, array_lvl, field_name, _init_expr) = norm_field;
 
 					// Get current class
 					let curr_cls = self.get_curr_scope_as_class();
@@ -724,7 +720,7 @@ impl Visitor for DecafTreeBuilder {
 							curr_cls.pub_fields.borrow_mut().push(field);
 						}
 						_ => {
-							return Err(E_INVALID_MODIFIER)
+							return Err(EInvalidModifier)
 						}
 					};
 				}
@@ -736,10 +732,15 @@ impl Visitor for DecafTreeBuilder {
 
 				// Visit the expression if there's any
 				for norm_field in field_node.normalize() {
-					let (ty, array_lvl, field_name, init_expr) = norm_field;
+					let (_ty, _array_lvl, field_name, init_expr) = norm_field;
 					let field = cls.get_field_by_name(&field_name).unwrap();
 					if let Some(init_expr) = init_expr {
-						init_expr.accept(self)?;
+						match init_expr.accept(self) {
+							Ok(ExprNode(init_expr)) => {
+								field.set_init_expr(init_expr);
+							},
+							_ => return Err(EExprNodeNotFound),
+						}
 					}
 				}
 				Ok(Normal)
@@ -880,7 +881,7 @@ impl Visitor for DecafTreeBuilder {
 						}
 					}
 					_ => {
-						return Err(E_INVALID_MODIFIER);
+						return Err(EInvalidModifier);
 					}
 				};
 			},
@@ -891,7 +892,7 @@ impl Visitor for DecafTreeBuilder {
 				let cls = self.get_curr_scope_as_class();
 
 				// Normalize method
-				let (return_ty, array_lvl, name, args, block) = mthd.normalize();
+				let (return_ty, array_lvl, _name, args, _block) = mthd.normalize();
 				let is_static = mthd.modies.iter().any(|x| {
 					if let ModStatic(_) = x {
 						true
@@ -913,7 +914,7 @@ impl Visitor for DecafTreeBuilder {
 						Ok(Normal)
 					}
 					Ok(_) => {
-						Err(E_BLOCK_STMT_NOT_FOUND)
+						Err(EBlockStmtNotFound)
 					}
 					Err(e) => Err(e)
 				};
@@ -928,26 +929,13 @@ impl Visitor for DecafTreeBuilder {
 
 	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result {
 		use SemanticError::*;
-		use self::BuilderState::*;
 		use self::BuilderResult::*;
 		use crate::lnp::past::Expr::*;
 		use crate::lnp::past::BinOp::*;
 		use crate::lnp::past::UnOp::*;
-		use crate::lnp::past::Prim::*;
-		use crate::lnp::past::PrimitiveType::*;
-		use crate::lnp::past::Litr::*;
-		use crate::lnp::past::NAExpr::*;
-		use crate::lnp::past::NNAExpr::*;
-		use crate::lnp::past::AExpr::*;
-		use crate::decaf::TypeBase::*;
-		use crate::decaf::Scope::*;
-		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
-						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
-						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr,
-						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
-		use crate::decaf::LiteralExpr::*;
+		use crate::decaf::{AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
+						   UnNotExpr};
 		use crate::decaf::Expr::*;
-		use SemanticError::*;
 		match &expr.expr {
 			BinaryExpr(left_expr, binop, right_expr) => {
 				match (right_expr.accept(self), left_expr.accept(self)) {
@@ -955,7 +943,7 @@ impl Visitor for DecafTreeBuilder {
 						let (lhs, rhs) = {
 							match (lhs, rhs) {
 								(ExprNode(lhs), ExprNode(rhs)) => (lhs, rhs),
-								_ => return Err(E_EXPR_NODE_NOT_FOUND)
+								_ => return Err(EExprNodeNotFound)
 							}
 						};
 						// TODO : Ord trait for Type
@@ -970,7 +958,7 @@ impl Visitor for DecafTreeBuilder {
 												rhs: Box::new(rhs),
 											})))
 										} else {
-											Err(E_LHS_NOT_ADDRESSABLE)
+											Err(ELhsNotAddressable)
 										}
 									}
 									PlusOp | MinusOp | TimesOp | DivideOp | ModOp => {
@@ -981,7 +969,7 @@ impl Visitor for DecafTreeBuilder {
 												op: binop.op.clone(),
 											})))
 										} else {
-											Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
+											Err(EExprNotSupportArithOp)
 										}
 									}
 									LogicalOrOp | LogicalAndOp | EqualsOp | NotEqualsOp => {
@@ -992,7 +980,7 @@ impl Visitor for DecafTreeBuilder {
 												op: binop.op.clone(),
 											})))
 										} else {
-											Err(E_EXPR_NOT_SUPPORT_LOGICAL_OP)
+											Err(EExprNotSupportLogicalOp)
 										}
 									}
 									_ => {
@@ -1003,12 +991,12 @@ impl Visitor for DecafTreeBuilder {
 												op: binop.op.clone(),
 											})))
 										} else {
-											Err(E_EXPR_NOT_SUPPORT_CMP_OP)
+											Err(EExprNotSupportCmpOp)
 										}
 									}
 								}
 							}
-							false => Err(E_EXPR_NOT_COMPATIBLE_TYPE)
+							false => Err(EExprNotCompatibleType)
 						}
 					}
 					(Err(e), _) | (_, Err(e))=> Err(e)
@@ -1019,7 +1007,7 @@ impl Visitor for DecafTreeBuilder {
 					Ok(rhs) => {
 						let rhs = match rhs {
 							ExprNode(rhs) => rhs,
-							_ => return Err(E_EXPR_NODE_NOT_FOUND)
+							_ => return Err(EExprNodeNotFound)
 						};
 						match unop.op {
 							PlusUOp | MinusUOp => {
@@ -1029,7 +1017,7 @@ impl Visitor for DecafTreeBuilder {
 										op: unop.op.clone(),
 									})))
 								} else {
-									Err(E_EXPR_NOT_SUPPORT_ARITH_OP)
+									Err(EExprNotSupportArithOp)
 								}
 							}
 							NotUOp => {
@@ -1038,7 +1026,7 @@ impl Visitor for DecafTreeBuilder {
 										rhs: Box::new(rhs)
 									})))
 								} else {
-									Err(E_EXPR_NOT_SUPPORT_LOGICAL_OP)
+									Err(EExprNotSupportLogicalOp)
 								}
 							}
 						}
@@ -1129,7 +1117,7 @@ impl Visitor for DecafTreeBuilder {
 						curr_cls.pub_ctors.borrow_mut().push(ctor_node);
 					},
 					_ => {
-						return Err(E_INVALID_MODIFIER);
+						return Err(EInvalidModifier);
 					}
 				};
 			}
@@ -1140,7 +1128,7 @@ impl Visitor for DecafTreeBuilder {
 				let cls = self.get_curr_scope_as_class();
 
 				// Normalize ctor
-				let (args, block) = ctor.normalize();
+				let (args, _block) = ctor.normalize();
 
 				// Get current ctor
 				let ctor_node = cls.get_ctor_by_signature(&args).unwrap();
@@ -1155,7 +1143,7 @@ impl Visitor for DecafTreeBuilder {
 						Ok(Normal)
 					}
 					Ok(_) => {
-						Err(E_BLOCK_STMT_NOT_FOUND)
+						Err(EBlockStmtNotFound)
 					}
 					Err(e) => Err(e)
 				};
@@ -1189,7 +1177,7 @@ impl Visitor for DecafTreeBuilder {
 								// Check for name conflict and add variable
 								match self.variable_lookup(name.clone()) {
 									Some(_) => {
-										return Err(E_VARIABLE_REDEFINITION);
+										return Err(EVariableRedefinition);
 									}
 									None => {
 										let real_ty = decaf::Type {
@@ -1212,10 +1200,10 @@ impl Visitor for DecafTreeBuilder {
 																	init_expr: Some(init_expr_v),
 																}));
 															} else {
-																return Err(E_EXPR_NOT_COMPATIBLE_TYPE);
+																return Err(EExprNotCompatibleType);
 															}
 														},
-														_ => return Err(E_EXPR_NODE_NOT_FOUND)
+														_ => return Err(EExprNodeNotFound)
 													}
 													Err(e) => return Err(e)
 												}
@@ -1249,18 +1237,18 @@ impl Visitor for DecafTreeBuilder {
 																	cond: condexpr,
 																	thenblock,
 																}))),
-															_ => Err(E_BLOCK_STMT_NOT_FOUND)
+															_ => Err(EBlockStmtNotFound)
 														}
-														_ => Err(E_STMT_OR_VEC_STMT_NOT_FOUND)
+														_ => Err(EStmtOrVecStmtNotFound)
 													}
 												},
 												Err(e) => Err(e)
 											}
 										} else {
-											Err(E_COND_NOT_LOGICAL_TYPE)
+											Err(ECondNotLogicalType)
 										}
 									}
-									_ => Err(E_EXPR_NODE_NOT_FOUND)
+									_ => Err(EExprNodeNotFound)
 								}
 							},
 							Err(e) => Err(e)
@@ -1280,29 +1268,28 @@ impl Visitor for DecafTreeBuilder {
 																thenblock,
 																elseblock,
 															}))),
-														_ => Err(E_BLOCK_STMT_NOT_FOUND)
+														_ => Err(EBlockStmtNotFound)
 													},
-												_ => Err(E_STMT_NODE_NOT_FOUND)
+												_ => Err(EStmtNodeNotFound)
 											},
 											(Err(e), _) | (_, Err(e)) => Err(e)
 										}
 									} else {
-										Err(E_COND_NOT_LOGICAL_TYPE)
+										Err(ECondNotLogicalType)
 									}
 								}
-								_ => Err(E_EXPR_NODE_NOT_FOUND)
+								_ => Err(EExprNodeNotFound)
 							},
 							Err(e) => Err(e)
 						},
 					ExprStmt(expr) => {
-						use crate::decaf::Expr::*;
 						match expr.accept(self) {
 							Ok(expr) =>
 								match expr {
 									ExprNode(expr) => Ok(StmtNode(Expr(decaf::ExprStmt {
 										expr,
 									}))),
-									_ => Err(E_EXPR_NODE_NOT_FOUND)
+									_ => Err(EExprNodeNotFound)
 								},
 
 							Err(e) => Err(e)
@@ -1311,20 +1298,28 @@ impl Visitor for DecafTreeBuilder {
 					WhileStmt(condexpr, stmt) => {
 						match condexpr.accept(self) {
 							Ok(condexpr) => match condexpr {
-								ExprNode(condexpr) => match stmt.accept(self) {
-									Ok(bodystmt) => match bodystmt {
-										StmtNode(bodystmt) => match bodystmt {
-											Block(bodyblock) => Ok(StmtNode(While(decaf::WhileStmt {
-												condexpr,
-												bodyblock,
-											}))),
-											_ => Err(E_BLOCK_STMT_NOT_FOUND)
-										},
-										_ => Err(E_STMT_NODE_NOT_FOUND)
+								ExprNode(condexpr) => {
+									let whilestmt = Rc::new(decaf::WhileStmt {
+										condexpr,
+										bodyblock: RefCell::new(None),
+									});
+									self.scopes.push(WhileScope(whilestmt.clone()));
+									match stmt.accept(self) {
+										Ok(bodystmt) => match bodystmt {
+											StmtNode(bodystmt) => match bodystmt {
+												Block(bodyblock) => {
+													*whilestmt.bodyblock.borrow_mut() = Some(bodyblock);
+													self.scopes.pop();
+													Ok(StmtNode(While(whilestmt)))
+												},
+												_ => Err(EBlockStmtNotFound)
+											},
+											_ => Err(EStmtNodeNotFound)
+										}
+										Err(e) => Err(e)
 									}
-									Err(e) => Err(e)
 								}
-								_ => Err(E_EXPR_NODE_NOT_FOUND)
+								_ => Err(EExprNodeNotFound)
 							}
 							Err(e) => Err(e)
 						}
@@ -1333,18 +1328,19 @@ impl Visitor for DecafTreeBuilder {
 						use decaf::Scope::*;
 						match retexpr {
 							None => {
+								use decaf::TypeBase::*;
 								// Check if return type is void
 								match self.get_top_most_method_scope() {
 									Some(MethodScope(method)) => {
-										if let VoidTy = &method.return_ty.borrow().base {
+										if let VoidTy = &(*method.return_ty.borrow()).base {
 											Ok(StmtNode(Return(decaf::ReturnStmt {
 												expr: None,
 											})))
 										} else {
-											Err(E_UNMATCHED_RETURN_TYPE)
+											Err(EUnmatchedReturnType)
 										}
 									}
-									_ => Err(E_RETURN_IN_NON_METHOD_SCOPE)
+									_ => Err(EReturnInNonMethodScope)
 								}
 							}
 							Some(retexpr) => match retexpr.accept(self) {
@@ -1358,13 +1354,13 @@ impl Visitor for DecafTreeBuilder {
 														expr: Some(retexpr),
 													})))
 												} else {
-													Err(E_UNMATCHED_RETURN_TYPE)
+													Err(EUnmatchedReturnType)
 												}
 											}
-											_ => Err(E_RETURN_IN_NON_METHOD_SCOPE)
+											_ => Err(EReturnInNonMethodScope)
 										}
 									},
-									_ => Err(E_EXPR_NODE_NOT_FOUND)
+									_ => Err(EExprNodeNotFound)
 								},
 								Err(e) => Err(e)
 							}
@@ -1379,7 +1375,7 @@ impl Visitor for DecafTreeBuilder {
 									lup: whilestmt.clone(),
 								})))
 							}
-							_ => Err(E_CONTINUE_NOT_IN_LOOP)
+							_ => Err(EContinueNotInLoop)
 						}
 					}
 					BreakStmt => {
@@ -1391,7 +1387,7 @@ impl Visitor for DecafTreeBuilder {
 									lup: whilestmt.clone(),
 								})))
 							}
-							_ => Err(E_BREAK_NOT_IN_LOOP)
+							_ => Err(EBreakNotInLoop)
 						}
 					}
 					SuperStmt(args) => {
@@ -1410,16 +1406,16 @@ impl Visitor for DecafTreeBuilder {
 														sup_ctor,
 														args: args_expr,
 													}))),
-													None => Err(E_NO_COMPATIBLE_CTOR)
+													None => Err(ENoCompatibleCtor)
 												}
 											},
-											Some(_) | None => Err(E_CALLING_CTOR_OUTSIDE_CLASS)
+											Some(_) | None => Err(ECallingCtorOutsideClass)
 										}
 									}
-									_ => Err(E_VEC_EXPR_NOT_FOUND)
+									_ => Err(EVecExprNotFound)
 								}
 							}
-							None => Err(E_CALLING_SUPER_CTOR_OUTSIDE_CTOR)
+							None => Err(ECallingSuperCtorOutsideCtor)
 						}
 					}
 					BlockStmt(block) => block.accept(self),
@@ -1432,24 +1428,12 @@ impl Visitor for DecafTreeBuilder {
 		use SemanticError::*;
 		use self::BuilderState::*;
 		use self::BuilderResult::*;
-		use crate::lnp::past::Expr::*;
-		use crate::lnp::past::BinOp::*;
-		use crate::lnp::past::UnOp::*;
 		use crate::lnp::past::Prim::*;
 		use crate::lnp::past::PrimitiveType::*;
-		use crate::lnp::past::Litr::*;
 		use crate::lnp::past::NAExpr::*;
-		use crate::lnp::past::NNAExpr::*;
-		use crate::lnp::past::AExpr::*;
 		use crate::decaf::TypeBase::*;
-		use crate::decaf::Scope::*;
-		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
-						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr, ClassIdExpr,
-						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr, ThisExpr,
-						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
-		use crate::decaf::LiteralExpr::*;
+		use crate::decaf::{CreateArrayExpr, ClassIdExpr, VariableExpr};
 		use crate::decaf::Expr::*;
-		use SemanticError::*;
 		match self.state {
 			First => panic!("primary should not be visited in the first pass"),
 			Second => {
@@ -1469,13 +1453,13 @@ impl Visitor for DecafTreeBuilder {
 															dims: dims_expr,
 														})))
 													} else {
-														Err(E_CLASS_NOT_DEFINED)
+														Err(EClassNotDefined)
 													}
 												} else {
-													Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+													Err(EDimExprNotArithType)
 												}
 											},
-											_ => Err(E_VEC_EXPR_NOT_FOUND),
+											_ => Err(EVecExprNotFound),
 										}
 									}
 									Err(e) => Err(e)
@@ -1500,13 +1484,13 @@ impl Visitor for DecafTreeBuilder {
 															ty: CharTy,
 															dims: dims_expr,
 														}))),
-														VoidType(_) => Err(E_VOID_ARRAY)
+														VoidType(_) => Err(EVoidArray)
 													}
 												} else {
-													Err(E_DIM_EXPR_NOT_ARITH_TYPE)
+													Err(EDimExprNotArithType)
 												}
 											},
-											_ => Err(E_EXPR_NODE_NOT_FOUND),
+											_ => Err(EExprNodeNotFound),
 										}
 									}
 									Err(e) => Err(e)
@@ -1524,7 +1508,7 @@ impl Visitor for DecafTreeBuilder {
 								Some(cls) => Ok(ExprNode(ClassId(ClassIdExpr {
 									cls,
 								}))),
-								None => Err(E_UNKNOWN_IDENTIFIER)
+								None => Err(EUnknownIdentifier)
 							}
 						}
 					}
@@ -1536,21 +1520,13 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_nnaexpr(&mut self, nnaexpr: &lnp::past::NNAExpr) -> Self::Result {
 		use self::BuilderState::*;
 		use self::BuilderResult::*;
-		use crate::lnp::past::Expr::*;
-		use crate::lnp::past::BinOp::*;
-		use crate::lnp::past::UnOp::*;
-		use crate::lnp::past::Prim::*;
-		use crate::lnp::past::PrimitiveType::*;
 		use crate::lnp::past::Litr::*;
-		use crate::lnp::past::NAExpr::*;
 		use crate::lnp::past::NNAExpr::*;
 		use crate::lnp::past::AExpr::*;
 		use crate::lnp::past::FExpr::*;
 		use crate::decaf::TypeBase::*;
 		use crate::decaf::Scope::*;
-		use crate::decaf::{Expr, AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
-						   UnNotExpr, CreateArrayExpr, LiteralExpr, CreateObjExpr,
-						   StaticMethodCallExpr, MethodCallExpr, SuperCallExpr, ThisExpr,
+		use crate::decaf::{CreateObjExpr, MethodCallExpr, SuperCallExpr,
 						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
 		use crate::decaf::LiteralExpr::*;
 		use crate::decaf::Expr::*;
@@ -1586,13 +1562,13 @@ impl Visitor for DecafTreeBuilder {
 											ctor: ctor,
 											args: arg_exprs,
 										}))),
-										None => Err(E_NO_COMPATIBLE_CTOR),
+										None => Err(ENoCompatibleCtor),
 									}
 								}
-								_ => Err(E_VEC_EXPR_NOT_FOUND)
+								_ => Err(EVecExprNotFound)
 							}
 						} else {
-							Err(E_CLASS_NOT_DEFINED)
+							Err(EClassNotDefined)
 						}
 					}
 					CallSelfMethod(id, args) => {
@@ -1602,26 +1578,33 @@ impl Visitor for DecafTreeBuilder {
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
 										match cls.get_compatible_level0_method(&arg_exprs) {
-											Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
-												var: Box::new({
-													match self.visit_this() {
-														Ok(ExprNode(this_expr)) => match this_expr {
-															This(_) => this_expr,
-															_ => return Err(E_THIS_NOT_FOUND),
-														},
-														_ => return Err(E_EXPR_NODE_NOT_FOUND)
-													}
-												}),
-												method: method,
-												args: arg_exprs,
-											}))),
-											None => Err(E_NO_COMPATIBLE_METHOD)
+											Some(method) => {
+												if method.name == *id {
+													Ok(ExprNode(MethodCall(MethodCallExpr {
+														var: Box::new({
+															match self.visit_this() {
+																Ok(ExprNode(this_expr)) => match this_expr {
+																	This(_) => this_expr,
+																	_ => return Err(EThisNotFound),
+																},
+																_ => return Err(EExprNodeNotFound)
+															}
+														}),
+														method,
+														args: arg_exprs,
+													})))
+												}
+												else {
+													Err(ENoCompatibleMethod)
+												}
+											},
+											None => Err(ENoCompatibleMethod)
 										}
 									},
-									_ => Err(E_METHOD_CALL_WITHOUT_CLASS),
+									_ => Err(EMethodCallWithoutClass),
 								}
 							}
-							_ => Err(E_VEC_EXPR_NOT_FOUND)
+							_ => Err(EVecExprNotFound)
 						}
 					}
 					CallMethod(nprim, id, args) => {
@@ -1636,12 +1619,18 @@ impl Visitor for DecafTreeBuilder {
 												} else {
 													cls_id_expr.cls.get_compatible_level1_static_method(&arg_exprs)
 												} {
-													Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
-														var: Box::new(ClassId(cls_id_expr)),
-														method: method,
-														args: arg_exprs
-													}))),
-													None => Err(E_NO_COMPATIBLE_METHOD)
+													Some(method) => {
+														if method.name == *id {
+															Ok(ExprNode(MethodCall(MethodCallExpr {
+																var: Box::new(ClassId(cls_id_expr)),
+																method,
+																args: arg_exprs
+															})))
+														} else {
+															Err(ENoCompatibleMethod)
+														}
+													}
+													None => Err(ENoCompatibleMethod)
 												}
 											},
 											_ => {
@@ -1654,26 +1643,32 @@ impl Visitor for DecafTreeBuilder {
 														} else {
 															cls.get_compatible_level1_method(&arg_exprs)
 														} {
-															Some(method) => Ok(ExprNode(MethodCall(MethodCallExpr {
-																var: Box::new(prim_expr),
-																method: method,
-																args: arg_exprs
-															}))),
-															None => Err(E_NO_COMPATIBLE_METHOD)
+															Some(method) => {
+																if method.name == *id {
+																	Ok(ExprNode(MethodCall(MethodCallExpr {
+																		var: Box::new(prim_expr),
+																		method,
+																		args: arg_exprs
+																	})))
+																} else {
+																	Err(ENoCompatibleMethod)
+																}
+															},
+															None => Err(ENoCompatibleMethod)
 														}
 													} else {
-														Err(E_ARRAY_TYPE_NOT_SUPPORT_METHOD_CALL)
+														Err(EArrayTypeNotSupportMethodCall)
 													}
 												} else {
-													Err(E_NON_CLASS_TYPE_NOT_SUPPORT_METHOD_CALL)
+													Err(ENonClassTypeNotSupportMethodCall)
 												}
 											}
 										}
 									},
-									_ => Err(E_EXPR_NODE_NOT_FOUND)
+									_ => Err(EExprNodeNotFound)
 								}
 							}
-							_ => Err(E_VEC_EXPR_NOT_FOUND)
+							_ => Err(EVecExprNotFound)
 						}
 					}
 					CallSuper(id, args) => {
@@ -1683,18 +1678,24 @@ impl Visitor for DecafTreeBuilder {
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
 										match cls.get_compatible_level0_super_method(&arg_exprs) {
-											Some(method) => Ok(ExprNode(SuperCall(SuperCallExpr {
-												cls: cls.clone(),
-												method: method,
-												args: arg_exprs,
-											}))),
-											None => Err(E_NO_COMPATIBLE_METHOD)
+											Some(method) => {
+												if method.name == *id {
+													Ok(ExprNode(SuperCall(SuperCallExpr {
+														cls: cls.clone(),
+														method: method,
+														args: arg_exprs,
+													})))
+												} else {
+													Err(ENoCompatibleMethod)
+												}
+											},
+											None => Err(ENoCompatibleMethod)
 										}
 									}
-									Some(_) | None => Err(E_SUPER_CALL_WITHOUT_CLASS)
+									Some(_) | None => Err(ESuperCallWithoutClass)
 								}
 							},
-							Ok(_) => Err(E_VEC_EXPR_NOT_FOUND),
+							Ok(_) => Err(EVecExprNotFound),
 							Err(e) => Err(e)
 						}
 					}
@@ -1716,15 +1717,15 @@ impl Visitor for DecafTreeBuilder {
 															idx: Box::new(idx_expr),
 														})))
 													} else {
-														Err(E_ARRAY_ACCESS_ON_NONARRAY_TYPE)
+														Err(EArrayAccessOnNonArrayType)
 													}
 												}
-												_ => Err(E_EXPR_NODE_NOT_FOUND)
+												_ => Err(EExprNodeNotFound)
 											}
 											Err(e) => Err(e)
 										}
 									}
-									None => Err(E_UNKNOWN_IDENTIFIER)
+									None => Err(EUnknownIdentifier)
 								}
 							}
 							ComplexArrayExpr(nna, dim) => {
@@ -1741,15 +1742,15 @@ impl Visitor for DecafTreeBuilder {
 																idx: Box::new(dim_expr),
 															})))
 														}
-														_ => Err(E_EXPR_NODE_NOT_FOUND)
+														_ => Err(EExprNodeNotFound)
 													}
 													Err(e) => Err(e)
 												}
 											} else {
-												Err(E_ARRAY_ACCESS_ON_NONARRAY_TYPE)
+												Err(EArrayAccessOnNonArrayType)
 											}
 										}
-										_ => Err(E_EXPR_NODE_NOT_FOUND)
+										_ => Err(EExprNodeNotFound)
 									}
 									Err(e) => Err(e)
 								}
@@ -1778,16 +1779,16 @@ impl Visitor for DecafTreeBuilder {
 																	cls: cls,
 																	fld: fld,
 																}))),
-																None => Err(E_NO_COMPATIBLE_FIELD)
+																None => Err(ENoCompatibleField)
 															}
 														}
-														_ => Err(E_ARRAY_TYPE_NO_FIELD)
+														_ => Err(EArrayTypeNoField)
 													}
 												}
-												_ => Err(E_PRIMITIVE_TYPE_NO_FIELD)
+												_ => Err(EPrimitiveTypeNoField)
 											}
 										}
-										_ => Err(E_EXPR_NODE_NOT_FOUND)
+										_ => Err(EExprNodeNotFound)
 									}
 									Err(e) => Err(e)
 								}
@@ -1803,18 +1804,18 @@ impl Visitor for DecafTreeBuilder {
 													match self.visit_this() {
 														Ok(ExprNode(this_expr)) => match this_expr {
 															This(_) => this_expr,
-															_ => return Err(E_THIS_NOT_FOUND),
+															_ => return Err(EThisNotFound),
 														},
-														_ => return Err(E_EXPR_NODE_NOT_FOUND)
+														_ => return Err(EExprNodeNotFound)
 													}
 												}),
 												cls,
 												fld,
 											}))),
-											None => Err(E_NO_COMPATIBLE_FIELD)
+											None => Err(ENoCompatibleField)
 										}
 									}
-									_ => Err(E_FIELD_ACCESS_WITHOUT_CLASS)
+									_ => Err(EFieldAccessWithoutClass)
 								}
 							}
 						}
@@ -1835,7 +1836,7 @@ impl Visitor for DecafTreeBuilder {
 						res.push(arg_expr);
 					}
 					_ => {
-						return Err(E_EXPR_NODE_NOT_FOUND);
+						return Err(EExprNodeNotFound);
 					}
 				}
 				Err(e) => { return Err(e); }
@@ -1845,7 +1846,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
-		use std::cell::RefCell;
 		use self::BuilderResult::*;
 		use self::BuilderState::*;
 		use decaf::Stmt::*;
@@ -1869,13 +1869,15 @@ impl Visitor for DecafTreeBuilder {
 							blockstmt.stmts.borrow_mut().push(stmt);
 						}
 						Ok(_) => {
-							return Err(E_STMT_NODE_NOT_FOUND);
+							return Err(EStmtNodeNotFound);
 						}
 						Err(e) => {
 							return Err(e);
 						}
 					}
 				}
+
+				self.scopes.pop();
 
 				Ok(StmtNode(Block(blockstmt)))
 			}
@@ -1885,8 +1887,6 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_dims(&mut self, dims: &Vec<lnp::past::Dimension>) -> Self::Result {
 		use self::BuilderResult::*;
 		use self::BuilderState::*;
-		use decaf::Stmt::*;
-		use decaf::Scope::*;
 		use SemanticError::*;
 		match self.state {
 			First => panic!("dims should not be visited in the first pass"),
@@ -1898,7 +1898,7 @@ impl Visitor for DecafTreeBuilder {
 							res.push(expr);
 						},
 						Ok(_) => {
-							return Err(E_EXPR_NODE_NOT_FOUND);
+							return Err(EExprNodeNotFound);
 						},
 						Err(e) => {
 							return Err(e);
@@ -1921,15 +1921,15 @@ impl Visitor for DecafTreeBuilder {
 				match self.get_top_most_method_scope() {
 					Some(MethodScope(mthd)) => {
 						if *mthd.stat.borrow() {
-							Err(E_THIS_IN_STATIC_METHOD)
+							Err(EThisInStaticMethod)
 						} else {
 							Ok(ExprNode(This(ThisExpr {cls})))
 						}
 					}
-					_ => Err(E_THIS_WITHOUT_METHOD)
+					_ => Err(EThisWithoutMethod)
 				}
 			}
-			_ => Err(E_THIS_WITHOUT_CLASS)
+			_ => Err(EThisWithoutClass)
 		}
 	}
 }

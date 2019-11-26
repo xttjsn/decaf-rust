@@ -1,11 +1,12 @@
 extern crate plex;
-
 pub mod lexer {
+
     use plex::lexer;
 	use std::str::FromStr;
 	use std::fmt;
 
     #[derive(Debug, Clone)]
+	#[allow(dead_code)]
     pub enum Token {
 		/// Comments
 		Whitespace,
@@ -180,6 +181,7 @@ pub mod lexer {
     }
 
     impl<'a> Lexer<'a> {
+		#[allow(dead_code)]
         pub fn new(s: &'a str) -> Lexer<'a> {
             Lexer {
                 original: s,
@@ -195,6 +197,7 @@ pub mod lexer {
     }
 
 	impl fmt::Display for Span {
+		#[allow(unused_must_use)]
 		fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 			write!(f, "{},{}", self.lo, self.hi);
 			Ok(())
@@ -249,6 +252,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Member {
 		FieldMember(Field),
 		MethodMember(Method),
@@ -283,6 +287,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Modifier {
 		ModStatic(ModNode),
 		ModPublic(ModNode),
@@ -315,6 +320,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Type {
 		Primitive(PrimitiveType),
 		Custom(String),
@@ -322,6 +328,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum PrimitiveType {
 		BoolType(PrimitiveTypeNode),
 		CharType(PrimitiveTypeNode),
@@ -348,6 +355,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum VarDeclaratorIdInner {
 		Single(String),
 		Array(Box<VarDeclaratorId>)
@@ -366,6 +374,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Stmt {
 		EmptyStmt,
 		DeclareStmt(Type, Vec<VarDeclarator>),
@@ -387,6 +396,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Expr {
 		BinaryExpr(Box<Expression>, BinaryOp, Box<Expression>),
 		UnaryExpr(UnaryOp, Box<Expression>),
@@ -400,6 +410,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, PartialEq, Clone)]
+	#[allow(dead_code)]
 	pub enum BinOp {
 		AssignOp,
 		LogicalOrOp,
@@ -424,6 +435,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, PartialEq, Clone)]
+	#[allow(dead_code)]
 	pub enum UnOp {
 		PlusUOp,
 		MinusUOp,
@@ -437,6 +449,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Prim {
 		NewArray(NewArrayExpr),
 		NonNewArray(Box<NonNewArrayExpr>),
@@ -450,6 +463,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum NAExpr {
 		NewCustom(String, Vec<Dimension>),
 		NewPrimitive(PrimitiveType, Vec<Dimension>),
@@ -468,6 +482,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum NNAExpr {
 		JustLit(Literal),
 		JustThis,
@@ -487,6 +502,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum FExpr {
 		PrimaryFieldExpr(Primary, String),
 		SuperFieldExpr(String),
@@ -499,6 +515,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum AExpr {
 		SimpleArraryExpr(String, Dimension),
 		ComplexArrayExpr(Box<NonNewArrayExpr>, Dimension),
@@ -511,6 +528,7 @@ pub mod past {
 	}
 
 	#[derive(Debug, Clone)]
+	#[allow(dead_code)]
 	pub enum Litr {
 		Null,
 		Bool(bool),
@@ -1069,6 +1087,7 @@ pub mod parser {
 
     }
 
+	#[allow(dead_code)]
     pub fn parse<I: Iterator<Item = (Token, Span)>>(
         i: I,
     ) -> Result<Program, (Option<(Token, Span)>, &'static str)> {
@@ -1076,6 +1095,7 @@ pub mod parser {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_decaf<'a>(src: &'a str) -> past::Program {
 	let lexer = lexer::Lexer::new(src).inspect(|tok| eprintln!("tok: {:?}", tok));
 	parser::parse(lexer).unwrap()
