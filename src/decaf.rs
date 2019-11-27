@@ -44,7 +44,7 @@ impl Type {
 		if self.array_lvl == 0 {
 			match &self.base {
 				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) => false,
-				IntTy => false,
+				IntTy => true,
 			}
 		} else {
 			false

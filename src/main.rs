@@ -1,4 +1,4 @@
-mod lnp;
+pub mod lnp;
 use std::io::Read;
 
 fn main() {

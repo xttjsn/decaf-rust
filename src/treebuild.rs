@@ -6,6 +6,14 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use crate::decaf::Scope::WhileScope;
 
+macro_rules! debug {
+() => (println!());
+($($arg:tt)*) => ({
+println!("DEBUG");
+println!($($arg)*);
+println!("END DEBUG")})
+}
+
 pub trait Visitor {
 	type Result;
 
@@ -294,6 +302,7 @@ pub enum BuilderState {
 	Second,
 }
 
+#[derive(PartialEq, Debug)]
 pub enum BuilderResult {
 	Normal,
 	ExprNode(decaf::Expr),
@@ -908,8 +917,10 @@ impl Visitor for DecafTreeBuilder {
 				self.scopes.push(MethodScope(method.clone()));
 
 				// Visit block
+				debug!("trying to visit block");
 				let ret = match mthd.block.accept(self) {
 					Ok(StmtNode(Block(blk))) => {
+						debug!("setting method body block");
 						*method.body.borrow_mut() = Some(blk);
 						Ok(Normal)
 					}
@@ -972,7 +983,7 @@ impl Visitor for DecafTreeBuilder {
 											Err(EExprNotSupportArithOp)
 										}
 									}
-									LogicalOrOp | LogicalAndOp | EqualsOp | NotEqualsOp => {
+									LogicalOrOp | LogicalAndOp => {
 										if lhs.get_type().is_logical_type() {
 											Ok(ExprNode(BinLogical(BinLogicalExpr {
 												lhs: Box::new(lhs),
@@ -1868,10 +1879,14 @@ impl Visitor for DecafTreeBuilder {
 						Ok(StmtNode(stmt)) => {
 							blockstmt.stmts.borrow_mut().push(stmt);
 						}
-						Ok(_) => {
-							return Err(EStmtNodeNotFound);
+						Ok(VecStmt(stmts)) => {
+							blockstmt.stmts.borrow_mut().extend(stmts);
 						}
+						Ok(_) => {
+							return Err(EStmtOrVecStmtNotFound);
+						},
 						Err(e) => {
+							debug!("visit_block: Get an error: {:?}", e);
 							return Err(e);
 						}
 					}
@@ -1933,3 +1948,6 @@ impl Visitor for DecafTreeBuilder {
 		}
 	}
 }
+
+// TODO: check whether return statements are in methods that returns non-void types.
+// TODO: implement String class
