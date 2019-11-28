@@ -549,6 +549,25 @@ pub mod parser {
     use super::lexer::Token::*;
     use super::lexer::*;
     use plex::parser;
+
+	macro_rules! binop {
+		($bop:path) => {
+			BinaryOp {
+				span: span!(),
+				op: $bop,
+			}
+		}
+	}
+
+	macro_rules! unop {
+		($uop:path) => {
+			UnaryOp {
+				span: span!(),
+				op: $uop,
+			}
+		}
+	}
+
     parser! {
         fn parse_(Token, Span);
 
@@ -815,102 +834,173 @@ pub mod parser {
 		}
 
 		expr: Expression {
-            #[no_reduce(Assign, Plus, Minus, Times, Divide, Mod, LessThan, GreaterThan, Not, Equals, GreaterOrEqual, LessOrEqual, NotEqual, LogicalAnd, LogicalOr)]
-			expr[le] binop[op] expr[re] => Expression {
+			assi_expr[ase] => ase,
+		}
+
+		assi_expr: Expression {
+			#[no_reduce(Assign)]
+			or_expr[oe] => oe,
+			or_expr[oel] Assign or_expr[oer] => Expression {
 				span: span!(),
-				expr: Expr::BinaryExpr(Box::new(le), op, Box::new(re)),
+				expr: Expr::BinaryExpr(Box::new(oel), binop!(BinOp::AssignOp), Box::new(oer)),
 			},
-            #[no_reduce(Assign, Plus, Minus, Times, Divide, Mod, LessThan, GreaterThan, Not, Equals, GreaterOrEqual, LessOrEqual, NotEqual, LogicalAnd, LogicalOr)]
-			unop[op] expr[e] => Expression {
+			assi_expr[ase] Assign or_expr[oe] => Expression {
 				span: span!(),
-				expr: Expr::UnaryExpr(op, Box::new(e)),
+				expr: Expr::BinaryExpr(Box::new(ase), binop!(BinOp::AssignOp), Box::new(oe)),
+			}
+		}
+
+		or_expr: Expression {
+			#[no_reduce(LogicalOr)]
+			and_expr[ae] => ae,
+			and_expr[ael] LogicalOr and_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ael), binop!(BinOp::LogicalOrOp), Box::new(aer)),
 			},
+			or_expr[oe] LogicalOr and_expr[ae] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(oe), binop!(BinOp::LogicalOrOp), Box::new(ae)),
+			}
+		}
+
+		and_expr: Expression {
+			#[no_reduce(LogicalAnd)]
+			eq_expr[ee] => ee,
+			eq_expr[eel] LogicalAnd eq_expr[eer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(eel), binop!(BinOp::LogicalAndOp), Box::new(eer)),
+			},
+			and_expr[ae] LogicalAnd eq_expr[ee] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ae), binop!(BinOp::LogicalAndOp), Box::new(ee)),
+			},
+		}
+
+		eq_expr: Expression {
+			#[no_reduce(Equals, NotEqual)]
+			cmp_expr[ce] => ce,
+			cmp_expr[cel] Equals cmp_expr[cer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(cel), binop!(BinOp::EqualsOp), Box::new(cer)),
+			},
+			cmp_expr[cel] NotEqual cmp_expr[cer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(cel), binop!(BinOp::NotEqualsOp), Box::new(cer)),
+			},
+			eq_expr[ee] Equals cmp_expr[cer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ee), binop!(BinOp::EqualsOp), Box::new(cer)),
+			},
+			eq_expr[ee] NotEqual cmp_expr[cer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ee), binop!(BinOp::NotEqualsOp), Box::new(cer)),
+			},
+		}
+
+		cmp_expr: Expression {
+			#[no_reduce(LessThan, GreaterThan, LessOrEqual, GreaterOrEqual)]
+			addi_expr[ae] => ae,
+			addi_expr[ael] LessThan addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ael), binop!(BinOp::LessThanOp), Box::new(aer)),
+			},
+			addi_expr[ael] GreaterThan addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ael), binop!(BinOp::GreaterThanOp), Box::new(aer)),
+			},
+			addi_expr[ael] LessOrEqual addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ael), binop!(BinOp::LessOrEqOp), Box::new(aer)),
+			},
+			addi_expr[ael] GreaterOrEqual addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ael), binop!(BinOp::GreaterOrEqOp), Box::new(aer)),
+			},
+			cmp_expr[ce] LessThan addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ce), binop!(BinOp::LessThanOp), Box::new(aer)),
+			},
+			cmp_expr[ce] GreaterThan addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ce), binop!(BinOp::GreaterThanOp), Box::new(aer)),
+			},
+			cmp_expr[ce] LessOrEqual addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ce), binop!(BinOp::LessOrEqOp), Box::new(aer)),
+			},
+			cmp_expr[ce] GreaterOrEqual addi_expr[aer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ce), binop!(BinOp::GreaterOrEqOp), Box::new(aer)),
+			},
+		}
+
+		addi_expr: Expression {
+			#[no_reduce(Plus, Minus)]
+			multi_expr[me] => me,
+			multi_expr[mel] Plus multi_expr[mer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(mel), binop!(BinOp::PlusOp), Box::new(mer)),
+			},
+			multi_expr[mel] Minus multi_expr[mer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(mel), binop!(BinOp::MinusOp), Box::new(mer)),
+			},
+			addi_expr[ae] Plus multi_expr[mer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ae), binop!(BinOp::PlusOp), Box::new(mer)),
+			},
+			addi_expr[ae] Minus multi_expr[mer] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(ae), binop!(BinOp::MinusOp), Box::new(mer)),
+			},
+		}
+
+		multi_expr: Expression {
+			#[no_reduce(Times, Divide, Mod)]
+			pref_expr[pe] => pe,
+			pref_expr[pel] Times pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(pel), binop!(BinOp::TimesOp), Box::new(per)),
+			},
+			pref_expr[pel] Divide pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(pel), binop!(BinOp::DivideOp), Box::new(per)),
+			},
+			pref_expr[pel] Mod pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(pel), binop!(BinOp::ModOp), Box::new(per)),
+			},
+			multi_expr[me] Times pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(me), binop!(BinOp::TimesOp), Box::new(per)),
+			},
+			multi_expr[me] Divide pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(me), binop!(BinOp::DivideOp), Box::new(per)),
+			},
+			multi_expr[me] Mod pref_expr[per] => Expression {
+				span: span!(),
+				expr: Expr::BinaryExpr(Box::new(me), binop!(BinOp::ModOp), Box::new(per)),
+			},
+		}
+
+		pref_expr: Expression {
 			primary[p] => Expression {
 				span: span!(),
 				expr: Expr::PrimaryExpr(p),
 			},
-            Ident(id) => Expression {
-                span: span!(),
-                expr: Expr::PrimaryExpr(Primary {
-                    span: span!(),
-                    prim: Prim::Identifier(id),
-                })
-            }
-		}
-
-		binop: BinaryOp {
-			Assign => BinaryOp {
+			Plus pref_expr[pe] => Expression {
 				span: span!(),
-				op: BinOp::AssignOp,
+				expr: Expr::UnaryExpr(unop!(UnOp::PlusUOp), Box::new(pe)),
 			},
-			LogicalOr => BinaryOp {
+			Minus pref_expr[pe] => Expression {
 				span: span!(),
-				op: BinOp::LogicalOrOp,
+				expr: Expr::UnaryExpr(unop!(UnOp::MinusUOp), Box::new(pe)),
 			},
-			LogicalAnd => BinaryOp {
+			Not pref_expr[pe] => Expression {
 				span: span!(),
-				op: BinOp::LogicalAndOp,
+				expr: Expr::UnaryExpr(unop!(UnOp::NotUOp), Box::new(pe)),
 			},
-			Equals => BinaryOp {
-				span: span!(),
-				op: BinOp::EqualsOp,
-			},
-			NotEqual => BinaryOp {
-				span: span!(),
-				op: BinOp::NotEqualsOp,
-			},
-			LessThan => BinaryOp {
-				span: span!(),
-				op: BinOp::LessThanOp,
-			},
-			GreaterThan => BinaryOp {
-				span: span!(),
-				op: BinOp::GreaterThanOp,
-			},
-			LessOrEqual => BinaryOp {
-				span: span!(),
-				op: BinOp::LessOrEqOp,
-			},
-			GreaterOrEqual => BinaryOp {
-				span: span!(),
-				op: BinOp::GreaterOrEqOp,
-			},
-			Plus => BinaryOp {
-				span: span!(),
-				op: BinOp::PlusOp,
-			},
-			Minus => BinaryOp {
-				span: span!(),
-				op: BinOp::MinusOp,
-			},
-			Times => BinaryOp {
-				span: span!(),
-				op: BinOp::TimesOp,
-			},
-			Divide => BinaryOp {
-				span: span!(),
-				op: BinOp::DivideOp,
-			},
-			Mod => BinaryOp {
-				span: span!(),
-				op: BinOp::ModOp,
-			},
-		}
-
-
-		unop: UnaryOp {
-			Plus => UnaryOp {
-				span: span!(),
-				op: UnOp::PlusUOp,
-			},
-			Minus => UnaryOp {
-				span: span!(),
-				op: UnOp::MinusUOp,
-			},
-			Not => UnaryOp {
-				span: span!(),
-				op: UnOp::NotUOp,
-			}
 		}
 
 		primary: Primary {
@@ -922,11 +1012,22 @@ pub mod parser {
 				span: span!(),
 				prim: Prim::NonNewArray(Box::new(ne)),
 			},
-			// #[no_reduce(LParen)]
-			// Ident(id) => Primary {
-			// 	span: span!(),
-			// 	prim: Prim::Identifier(id),
-			// },
+			Ident(id) => Primary {
+				span: span!(),
+				prim: Prim::Identifier(id),
+			},
+		}
+
+		primary_dot_ident: (Primary, String) {
+			primary[p] Dot Ident(id) => (p, id),
+		}
+
+		ident_dot_ident: (String, String) {
+			Ident(id0) Dot Ident(id1) => (id0, id1),
+		}
+
+		super_dot_ident: String {
+			Super Dot Ident(id) => id,
 		}
 
 		newarrayexpr: NewArrayExpr {
@@ -982,20 +1083,12 @@ pub mod parser {
                 expr: NNAExpr::CallSelfMethod(id, a),
             },
 
-            primary[p] Dot Ident(id) actualargs[a] => NonNewArrayExpr{
+			primary_dot_ident[pdi] actualargs[a] => NonNewArrayExpr{
                 span: span!(),
-                expr: NNAExpr::CallMethod(p, id, a),
+                expr: NNAExpr::CallMethod(pdi.0, pdi.1, a),
             },
 
-			Ident(id0) Dot Ident(id1) actualargs[a] => NonNewArrayExpr {
-				span: span!(),
-				expr: NNAExpr::CallMethod(Primary {
-					span: span!(),
-					prim: Prim::Identifier(id0)
-				}, id1, a),
-			},
-
-            Super Dot Ident(id) actualargs[a] => NonNewArrayExpr{
+            super_dot_ident[id] actualargs[a] => NonNewArrayExpr{
                 span: span!(),
                 expr: NNAExpr::CallSuper(id, a),
             },
@@ -1021,20 +1114,12 @@ pub mod parser {
         }
 
 		fieldexpr: FieldExpr {
-			#[no_reduce(LParen)]
-			primary[p] Dot Ident(id) => FieldExpr {
+			primary_dot_ident[pdi] => FieldExpr {
 				span: span!(),
-				expr: FExpr::PrimaryFieldExpr(p, id),
+				expr: FExpr::PrimaryFieldExpr(pdi.0, pdi.1),
 			},
-			Ident(id0) Dot Ident(id1) => FieldExpr {
-				span: span!(),
-				expr: FExpr::PrimaryFieldExpr(Primary {
-					span: span!(),
-					prim: Prim::Identifier(id0),
-				}, id1),
-			},
-			#[no_reduce(LParen)]   // fix nnaexpr and fieldexpr shift-reduce conflict
-			Super Dot Ident(id) => FieldExpr {
+
+			super_dot_ident[id] => FieldExpr {
 				span: span!(),
 				expr: FExpr::SuperFieldExpr(id),
 			},
