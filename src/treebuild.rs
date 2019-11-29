@@ -1,6 +1,6 @@
 use crate::lnp;
 use crate::decaf;
-use crate::decaf::Value;
+use crate::decaf::{Value, Returnable};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -136,6 +136,7 @@ pub enum SemanticError {
 	EThisNotFound,
 	EMethodCallWithoutClass,
 	EUnknownIdentifier,
+	EMissingReturn
 }
 
 trait Normalize {
@@ -921,8 +922,27 @@ impl Visitor for DecafTreeBuilder {
 				let ret = match mthd.block.accept(self) {
 					Ok(StmtNode(Block(blk))) => {
 						debug!("setting method body block");
-						*method.body.borrow_mut() = Some(blk);
-						Ok(Normal)
+
+						match return_ty {
+							VoidTy => {
+								*method.body.borrow_mut() = Some(blk);
+								Ok(Normal)
+							}
+							_ => {
+								// check if the last statement is a return
+								if let Some(rty) = Block(blk.clone()).returnable() {
+									if rty.base == return_ty && rty.array_lvl == array_lvl {
+										*method.body.borrow_mut() = Some(blk);
+										Ok(Normal)
+									}
+									else {
+										Err(EMissingReturn)
+									}
+								} else {
+									Err(EMissingReturn)
+								}
+							}
+						}
 					}
 					Ok(_) => {
 						Err(EBlockStmtNotFound)
@@ -973,7 +993,7 @@ impl Visitor for DecafTreeBuilder {
 										}
 									}
 									PlusOp | MinusOp | TimesOp | DivideOp | ModOp => {
-										if lhs.get_type().is_arith_type() {
+										if lhs.get_type().supports_arith_ops() {
 											Ok(ExprNode(BinArith(BinArithExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
@@ -984,7 +1004,7 @@ impl Visitor for DecafTreeBuilder {
 										}
 									}
 									LogicalOrOp | LogicalAndOp => {
-										if lhs.get_type().is_logical_type() {
+										if lhs.get_type().supports_logical_ops() {
 											Ok(ExprNode(BinLogical(BinLogicalExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
@@ -994,8 +1014,19 @@ impl Visitor for DecafTreeBuilder {
 											Err(EExprNotSupportLogicalOp)
 										}
 									}
-									_ => {
-										if lhs.get_type().is_cmp_type() {
+									GreaterThanOp | GreaterOrEqOp | LessThanOp | LessOrEqOp => {
+										if lhs.get_type().supports_cmp_ops() {
+											Ok(ExprNode(BinCmp(BinCmpExpr {
+												lhs: Box::new(lhs),
+												rhs: Box::new(rhs),
+												op: binop.op.clone(),
+											})))
+										} else {
+											Err(EExprNotSupportCmpOp)
+										}
+									}
+									EqualsOp | NotEqualsOp => {
+										if lhs.get_type().supports_eq_ops() {
 											Ok(ExprNode(BinCmp(BinCmpExpr {
 												lhs: Box::new(lhs),
 												rhs: Box::new(rhs),
@@ -1022,7 +1053,7 @@ impl Visitor for DecafTreeBuilder {
 						};
 						match unop.op {
 							PlusUOp | MinusUOp => {
-								if rhs.get_type().is_arith_type() {
+								if rhs.get_type().supports_arith_ops() {
 									Ok(ExprNode(UnArith(UnArithExpr {
 										rhs: Box::new(rhs),
 										op: unop.op.clone(),
@@ -1032,7 +1063,7 @@ impl Visitor for DecafTreeBuilder {
 								}
 							}
 							NotUOp => {
-								if rhs.get_type().is_logical_type() {
+								if rhs.get_type().supports_logical_ops() {
 									Ok(ExprNode(UnNot(UnNotExpr {
 										rhs: Box::new(rhs)
 									})))
@@ -1238,7 +1269,7 @@ impl Visitor for DecafTreeBuilder {
 							Ok(condexpr) => {
 								match condexpr {
 									ExprNode(condexpr) => {
-										if condexpr.get_type().is_logical_type() {
+										if condexpr.get_type().supports_logical_ops() {
 											match thenstmt.accept(self) {
 												Ok(thenstmt) => {
 													match thenstmt {
@@ -1268,7 +1299,7 @@ impl Visitor for DecafTreeBuilder {
 						match condexpr.accept(self) {
 							Ok(condexpr) => match condexpr {
 								ExprNode(condexpr) => {
-									if condexpr.get_type().is_logical_type() {
+									if condexpr.get_type().supports_logical_ops() {
 										match (thenstmt.accept(self), elsestmt.accept(self)) {
 											(Ok(thenstmt), Ok(elsestmt)) => match (thenstmt, elsestmt) {
 												(StmtNode(thenstmt), StmtNode(elsestmt)) =>
@@ -1456,7 +1487,7 @@ impl Visitor for DecafTreeBuilder {
 									Ok(dims_expr) => {
 										match dims_expr {
 											VecExpr(dims_expr) => {
-												if dims_expr.iter().all(|dim| dim.get_type().is_arith_type()) {
+												if dims_expr.iter().all(|dim| dim.get_type().supports_arith_ops()) {
 													// lookup class for id
 													if let Some(cls) = self.class_lookup(id.clone()) {
 														Ok(ExprNode(CreateArray(CreateArrayExpr {
@@ -1481,7 +1512,7 @@ impl Visitor for DecafTreeBuilder {
 									Ok(dims_expr) => {
 										match dims_expr {
 											VecExpr(dims_expr) => {
-												if dims_expr.iter().all(|dim| dim.get_type().is_arith_type()) {
+												if dims_expr.iter().all(|dim| dim.get_type().supports_arith_ops()) {
 													match primtype {
 														BoolType(_) => Ok(ExprNode(CreateArray(CreateArrayExpr {
 															ty: BoolTy,
@@ -1952,5 +1983,5 @@ impl Visitor for DecafTreeBuilder {
 // TODO: check whether return statements are in methods that returns non-void types.
 // TODO: implement String class
 // TODO: implement IO class
-// TODO: differentiate eq with cmp
+// DONE: differentiate eq with cmp
 // DONE: fix precedence

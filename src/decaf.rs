@@ -39,7 +39,7 @@ impl Type {
 		}
 	}
 
-	pub fn is_arith_type(&self) -> bool {
+	pub fn supports_arith_ops(&self) -> bool {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
@@ -51,7 +51,7 @@ impl Type {
 		}
 	}
 
-	pub fn is_logical_type(&self) -> bool {
+	pub fn supports_logical_ops(&self) -> bool {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
@@ -63,12 +63,24 @@ impl Type {
 		}
 	}
 
-	pub fn is_cmp_type(&self) -> bool {
+	pub fn supports_cmp_ops(&self) -> bool {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
 				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) => false,
 				IntTy | CharTy | BoolTy => true,
+			}
+		} else {
+			false
+		}
+	}
+
+	pub fn supports_eq_ops(&self) -> bool {
+		use TypeBase::*;
+		if self.array_lvl == 0 {
+			match &self.base {
+				UnknownTy(_)  | VoidTy => false,
+				IntTy | CharTy | BoolTy | ClassTy(_) | NULLTy => true,
 			}
 		} else {
 			false
@@ -227,6 +239,10 @@ pub trait Value {
 	fn get_type(&self) -> Type;
 }
 
+pub trait Returnable {
+	fn returnable(&self) -> Option<Type>;
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Variable {
 	pub name: String,
@@ -257,6 +273,45 @@ pub enum Stmt {
 	Super(SuperStmt),
 	Block(Rc<BlockStmt>),
 	NOP,
+}
+
+impl Returnable for Stmt {
+	fn returnable(&self) -> Option<Type> {
+		use Stmt::*;
+		match self {
+			NOP => None,
+			Declare(_) => None,
+			If(_) => None,
+			IfElse(stmt) => {
+				match Block(stmt.thenblock.clone()).returnable() {
+					None => None,
+					Some(thenty) => match Block(stmt.elseblock.clone()).returnable() {
+						None => None,
+						Some(elsety) => {
+							if thenty != elsety {
+								panic!("return type differs in thenblock and elseblock");
+							}
+							Some(thenty)
+						}
+					}
+				}
+			}
+			Expr(_) => None,
+			While(_) => None, // We don't know at compile time if while body will be executed at all
+			Return(stmt)=> {
+				match &stmt.expr {
+					None => None,
+					Some(expr) => Some(expr.get_type())
+				}
+			}
+			Continue(_) => None,
+			Break(_) => None,
+			Super(_) => None,
+			Block(blkstmt) => {
+				blkstmt.stmts.borrow().iter().rev().find_map(|stmt| stmt.returnable())
+			}
+		}
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
