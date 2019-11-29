@@ -529,7 +529,7 @@ class Foo {
 	// Cmp Op
 	#[test]
 	#[allow(unused_must_use)]
-	fn test_simple_logical_ops() {
+	fn test_simple_cmp_ops() {
 		use crate::treebuild::BuilderResult::*;
 		use crate::decaf::Stmt;
 		use crate::decaf::Expr;
@@ -922,7 +922,164 @@ class Foo {
 		}
 	}
 
-	// Cmp Op
+	#[test]
+	#[allow(unused_must_use)]
+	fn test_simple_logical_ops() {
+		use crate::treebuild::BuilderResult::*;
+		use crate::decaf::Stmt;
+		use crate::decaf::Expr;
+		use crate::decaf::LiteralExpr::*;
+		use crate::lnp::past::BinOp::*;
+		let mut builder = DecafTreeBuilder::new();
+
+		let program_str = r#"
+class Foo {
+	public int methodA() {
+	    int x = 19;
+	    x == 0 && x != 10;
+	    x >= 0;
+
+	    boolean y = false;
+	    boolean z = true;
+	    z == y && z != y;
+	    z != y;
+	    z = y;
+
+	    char c = 'q';
+	    char d = 'e';
+	    c == d;
+	    c != d;
+
+   	    x == 0 || x != 10;
+	    x > 0 || x < 10;
+	    x >= 0 || x <= 10;
+	}
+}
+"#;
+		let program = lnp::parse_decaf(program_str);
+		assert_eq!(program.classes.len(), 1);
+		assert_eq!(builder.visit_program(&program).unwrap(), Normal);
+
+		match builder.class_map.get(&"Foo".to_string()) {
+			None => assert_eq!(1, 0),
+			Some(foo) => {
+				assert_eq!(foo.name, "Foo");
+				assert_eq!(foo.sup.borrow().as_ref().unwrap().name, "Object");
+				assert_eq!(foo.pub_methods.borrow().len(), 1);
+
+				// Method-wise check
+				let method_a = &foo.pub_methods.borrow()[0];
+				assert_eq!(method_a.name, "methodA");
+				assert_eq!(method_a.return_ty.borrow().base, IntTy);
+				assert_eq!(method_a.args.borrow().len(), 0);
+
+				// Block-wise check
+				let body = method_a.body.borrow();
+				let block = body.as_ref().unwrap();
+				{
+					assert_eq!(block.vartbl.borrow().len(), 5);
+					assert_eq!(block.stmts.borrow().len(), 15);
+					assert_eq!(block.vartbl.borrow()[0].name, "x");
+					assert_eq!(block.vartbl.borrow()[0].ty.base, IntTy);
+					assert_eq!(block.vartbl.borrow()[0].ty.array_lvl, 0);
+
+					assert_eq!(block.vartbl.borrow()[1].name, "y");
+					assert_eq!(block.vartbl.borrow()[1].ty.base, BoolTy);
+					assert_eq!(block.vartbl.borrow()[1].ty.array_lvl, 0);
+
+					assert_eq!(block.vartbl.borrow()[2].name, "z");
+					assert_eq!(block.vartbl.borrow()[2].ty.base, BoolTy);
+					assert_eq!(block.vartbl.borrow()[2].ty.array_lvl, 0);
+
+					assert_eq!(block.vartbl.borrow()[3].name, "c");
+					assert_eq!(block.vartbl.borrow()[3].ty.base, CharTy);
+					assert_eq!(block.vartbl.borrow()[3].ty.array_lvl, 0);
+
+					assert_eq!(block.vartbl.borrow()[4].name, "d");
+					assert_eq!(block.vartbl.borrow()[4].ty.base, CharTy);
+					assert_eq!(block.vartbl.borrow()[4].ty.array_lvl, 0);
+				}
+
+				// Statement-by-statement check
+				let stmt_int_x = &block.stmts.borrow()[0];
+				{
+					assert!(matches!(stmt_int_x, Stmt::Declare(_)));
+					match &stmt_int_x {
+						Stmt::Declare(stmt) => {
+							assert_eq!(stmt.name, "x");
+							assert_eq!(stmt.ty.base, IntTy);
+							assert_eq!(stmt.ty.array_lvl, 0);
+							match &stmt.init_expr {
+								Some(expr) => {
+									match &expr {
+										Literal(IntLiteral(i)) => {
+											assert_eq!(*i, 19);
+										}
+										_ => panic!("expr expected to be an IntLiteral of 19"),
+									}
+								}
+								_ => panic!("stmt expected to have init_expr"),
+							}
+						}
+						_ => panic!("stmt_int_x expected to be Declare"),
+					}
+				}
+
+				let stmt_x_eqs_0 = &block.stmts.borrow()[1];
+				{
+					assert!(matches!(stmt_x_eqs_0, Stmt::Expr(_)));
+					match stmt_x_eqs_0 {
+						Stmt::Expr(stmt) => {
+							let expr = &stmt.expr;
+							match expr {
+								Expr::BinLogical(expr) => {
+									assert_eq!(expr.op, LogicalAndOp);
+									match (&*expr.lhs, &*expr.rhs) {
+										(Expr::BinCmp(expr_x_eqs_0), Expr::BinCmp(expr_x_neqs_10)) => {
+											assert_eq!(expr_x_eqs_0.op, EqualsOp);
+											assert_eq!(expr_x_neqs_10.op, NotEqualsOp);
+											match (&*expr_x_eqs_0.lhs, &*expr_x_eqs_0.rhs, &*expr_x_neqs_10.lhs, &*expr_x_neqs_10.rhs) {
+												(Expr::Variable(var_expr),
+													Expr::Literal(lit_0),
+													Expr::Variable(var_expr2),
+													Expr::Literal(lit_10)) => {
+
+													assert_eq!(var_expr.var.name, "x");
+													assert_eq!(var_expr.var.ty.base, IntTy);
+													assert_eq!(var_expr.var.ty.array_lvl, 0);
+													match lit_0 {
+														IntLiteral(i) => {
+															assert_eq!(*i, 0);
+														},
+														_ => panic!("lit expected to be a LiteralExpr of 0"),
+													}
+
+													assert_eq!(var_expr2.var.name, "x");
+													assert_eq!(var_expr2.var.ty.base, IntTy);
+													assert_eq!(var_expr2.var.ty.array_lvl, 0);
+													match lit_10 {
+														IntLiteral(i) => {
+															assert_eq!(*i, 10);
+														},
+														_ => panic!("lit expected to be a LiteralExpr of 10"),
+													}
+												}
+												_ => panic!("x == 0 && x != 0")
+											}
+										}
+										_ => panic!("lhs, rhs expected to be Variable and Literal")
+									}
+								}
+								_ => panic!("expr expected to be BinCmp expr")
+							}
+						}
+						_ => panic!("stmt expected to be Expr statement"),
+					}
+				}
+			}
+		}
+	}
+
 
 	// While Loop
 }

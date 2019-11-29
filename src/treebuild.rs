@@ -1951,3 +1951,6 @@ impl Visitor for DecafTreeBuilder {
 
 // TODO: check whether return statements are in methods that returns non-void types.
 // TODO: implement String class
+// TODO: implement IO class
+// TODO: differentiate eq with cmp
+// DONE: fix precedence
