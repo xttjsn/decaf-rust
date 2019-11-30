@@ -1,10 +1,11 @@
-use crate::lnp;
-use crate::decaf;
-use crate::decaf::{Value, Returnable};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::cell::RefCell;
+
+use crate::decaf;
+use crate::decaf::{Returnable, Value};
 use crate::decaf::Scope::WhileScope;
+use crate::lnp;
 
 macro_rules! debug {
 () => (println!());
@@ -534,8 +535,82 @@ impl ASTBuilder for DecafTreeBuilder {
 	}
 
 	fn load_builtin(&mut self) {
-		// TODO: load built-in classes: Object, String and IO
-		self.class_map.insert("Object".to_string(), Rc::new(decaf::Class::new("Object".to_string())));
+		use decaf::{Class, Method, Field, Type, TypeBase::*};
+		let objcls = Rc::new(Class::new("Object".to_string()));
+		let strcls = Rc::new(Class::new("String".to_string()));
+		let iocls = Rc::new(Class::new("IO".to_string()));
+
+		// No default methods for String
+		*strcls.sup.borrow_mut() = Some(objcls.clone());
+		{
+			let str_inner_fld = Field::new("str".to_string());
+			let str_len_fld = Field::new("len".to_string());
+			strcls.priv_fields.borrow_mut().push(Rc::new(str_inner_fld));
+			// TODO: add LLVM string valueo
+		}
+
+		// putChar, putString, putInt, getChar, getInt, getLine, peek()
+		*iocls.sup.borrow_mut() = Some(iocls.clone());
+		{
+			let put_char = Method::new("putChar".to_string(), iocls.clone());
+			*put_char.stat.borrow_mut() = true;
+			*put_char.return_ty.borrow_mut() = Rc::new(Type {
+				base: VoidTy,
+				array_lvl: 0,
+			});
+
+			let put_string = Method::new("putString".to_string(), iocls.clone());
+			*put_string.stat.borrow_mut() = true;
+			*put_string.return_ty.borrow_mut() = Rc::new(Type {
+				base: VoidTy,
+				array_lvl: 0,
+			});
+
+			let put_int = Method::new("putInt".to_string(), iocls.clone());
+			*put_int.stat.borrow_mut() = true;
+			*put_int.return_ty.borrow_mut() = Rc::new(Type {
+				base: VoidTy,
+				array_lvl: 0,
+			});
+
+			let get_char = Method::new("getChar".to_string(), iocls.clone());
+			*get_char.stat.borrow_mut() = true;
+			*get_char.return_ty.borrow_mut() = Rc::new(Type {
+				base: CharTy,
+				array_lvl: 0,
+			});
+
+			let get_line = Method::new("getLine".to_string(), iocls.clone());
+			*get_line.stat.borrow_mut() = true;
+			*get_line.return_ty.borrow_mut() = Rc::new(Type {
+				base: ClassTy(strcls.clone()),
+				array_lvl: 0,
+			});
+
+			let get_int = Method::new("getInt".to_string(), iocls.clone());
+			*get_int.stat.borrow_mut() = true;
+			*get_int.return_ty.borrow_mut() = Rc::new(Type {
+				base: IntTy,
+				array_lvl: 0,
+			});
+
+			let peek = Method::new("peek".to_string(), iocls.clone());
+			*peek.stat.borrow_mut() = true;
+			*peek.return_ty.borrow_mut() = Rc::new(Type {
+				base: CharTy,
+				array_lvl: 0,
+			});
+
+			(*iocls.pub_static_methods.borrow_mut()).extend(vec![Rc::new(put_char), Rc::new(put_string),
+																 Rc::new(put_int), Rc::new(get_char),
+																 Rc::new(get_line), Rc::new(get_int),
+																 Rc::new(peek)]);
+		}
+
+		self.class_map.insert("Object".to_string(), objcls);
+		self.class_map.insert("String".to_string(), strcls);
+		self.class_map.insert("IO".to_string(), iocls);
+
 		// TODO: reset scopes
 	}
 }
@@ -1466,6 +1541,75 @@ impl Visitor for DecafTreeBuilder {
 		}
 	}
 
+	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
+		use self::BuilderResult::*;
+		use self::BuilderState::*;
+		use decaf::Stmt::*;
+		use decaf::Scope::*;
+		use SemanticError::*;
+
+		match self.state {
+			First => panic!("block should not be visited in the first pass"),
+			Second => {
+				// Create a new scope
+				let blockstmt = Rc::new(decaf::BlockStmt {
+					vartbl: RefCell::new(Vec::new()),
+					stmts: RefCell::new(Vec::new()),
+				});
+
+				self.scopes.push(BlockScope(blockstmt.clone()));
+
+				for stmt in block.stmts.iter() {
+					match stmt.accept(self) {
+						Ok(StmtNode(stmt)) => {
+							blockstmt.stmts.borrow_mut().push(stmt);
+						}
+						Ok(VecStmt(stmts)) => {
+							blockstmt.stmts.borrow_mut().extend(stmts);
+						}
+						Ok(_) => {
+							return Err(EStmtOrVecStmtNotFound);
+						},
+						Err(e) => {
+							debug!("visit_block: Get an error: {:?}", e);
+							return Err(e);
+						}
+					}
+				}
+
+				self.scopes.pop();
+
+				Ok(StmtNode(Block(blockstmt)))
+			}
+		}
+	}
+
+	fn visit_dims(&mut self, dims: &Vec<lnp::past::Dimension>) -> Self::Result {
+		use self::BuilderResult::*;
+		use self::BuilderState::*;
+		use SemanticError::*;
+		match self.state {
+			First => panic!("dims should not be visited in the first pass"),
+			Second => {
+				let mut res = vec![];
+				for dim in dims.iter() {
+					match dim.expr.accept(self) {
+						Ok(ExprNode(expr)) => {
+							res.push(expr);
+						},
+						Ok(_) => {
+							return Err(EExprNodeNotFound);
+						},
+						Err(e) => {
+							return Err(e);
+						}
+					}
+				}
+				Ok(VecExpr(res))
+			}
+		}
+	}
+
 	fn visit_primary(&mut self, prim: &lnp::past::Primary) -> Self::Result {
 		use SemanticError::*;
 		use self::BuilderState::*;
@@ -1887,75 +2031,6 @@ impl Visitor for DecafTreeBuilder {
 		Ok(VecExpr(res))
 	}
 
-	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use decaf::Stmt::*;
-		use decaf::Scope::*;
-		use SemanticError::*;
-
-		match self.state {
-			First => panic!("block should not be visited in the first pass"),
-			Second => {
-				// Create a new scope
-				let blockstmt = Rc::new(decaf::BlockStmt {
-					vartbl: RefCell::new(Vec::new()),
-					stmts: RefCell::new(Vec::new()),
-				});
-
-				self.scopes.push(BlockScope(blockstmt.clone()));
-
-				for stmt in block.stmts.iter() {
-					match stmt.accept(self) {
-						Ok(StmtNode(stmt)) => {
-							blockstmt.stmts.borrow_mut().push(stmt);
-						}
-						Ok(VecStmt(stmts)) => {
-							blockstmt.stmts.borrow_mut().extend(stmts);
-						}
-						Ok(_) => {
-							return Err(EStmtOrVecStmtNotFound);
-						},
-						Err(e) => {
-							debug!("visit_block: Get an error: {:?}", e);
-							return Err(e);
-						}
-					}
-				}
-
-				self.scopes.pop();
-
-				Ok(StmtNode(Block(blockstmt)))
-			}
-		}
-	}
-
-	fn visit_dims(&mut self, dims: &Vec<lnp::past::Dimension>) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use SemanticError::*;
-		match self.state {
-			First => panic!("dims should not be visited in the first pass"),
-			Second => {
-				let mut res = vec![];
-				for dim in dims.iter() {
-					match dim.expr.accept(self) {
-						Ok(ExprNode(expr)) => {
-							res.push(expr);
-						},
-						Ok(_) => {
-							return Err(EExprNodeNotFound);
-						},
-						Err(e) => {
-							return Err(e);
-						}
-					}
-				}
-				Ok(VecExpr(res))
-			}
-		}
-	}
-
 	fn visit_this(&mut self) -> Self::Result {
 		use decaf::Expr::*;
 		use self::BuilderResult::*;
@@ -1979,9 +2054,3 @@ impl Visitor for DecafTreeBuilder {
 		}
 	}
 }
-
-// TODO: check whether return statements are in methods that returns non-void types.
-// TODO: implement String class
-// TODO: implement IO class
-// DONE: differentiate eq with cmp
-// DONE: fix precedence

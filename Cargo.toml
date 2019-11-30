@@ -12,3 +12,5 @@ path = "src/lib.rs"
 
 [dependencies]
 plex = "0.2.5"
+llvm-sys = "80"
+libc = "0.2.66"

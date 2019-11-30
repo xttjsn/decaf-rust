@@ -1,12 +1,13 @@
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::lnp::past::{BinOp, UnOp};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
 	Pub,
 	Priv,
-	Prot
+	Prot,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -588,6 +589,7 @@ impl Scope {
 	pub fn variable_lookup(&self, name: &str) -> Option<Rc<Variable>> {
 		use Scope::*;
 		match self {
+			// TODO: implement fields
 			ClassScope(_) | CtorScope(_) | MethodScope(_) | WhileScope(_) | GlobalScope => None,
 			BlockScope(blk) => {
 				for v in blk.vartbl.borrow().iter() {
