@@ -1,18 +1,16 @@
 #[cfg(test)]
 mod tests {
-	use crate::treebuild::DecafTreeBuilder;
-	use crate::treebuild::Visitor;
+	use crate::decaf::Expr::{Literal, Variable};
 	use crate::decaf::TypeBase::*;
 	use crate::lnp;
-	use crate::decaf::Expr::{Variable, Literal};
+	use crate::treebuild::DecafTreeBuilder;
+	use crate::treebuild::Visitor;
 
 	#[test]
-	fn test_visit_program() {
-	}
+	fn test_visit_program() {}
 
 	#[test]
-	fn test_visit_field() {
-	}
+	fn test_visit_field() {}
 
 	#[test]
 	#[allow(unused_must_use)]
@@ -306,6 +304,7 @@ class Foo {
 	    x = x * x;
 	    x = x / x;
 	    x = x - x;
+	    return 0;
 	}
 }
 "#;
@@ -330,7 +329,7 @@ class Foo {
 				let body = method_a.body.borrow();
 				let block = body.as_ref().unwrap();
 				assert_eq!(block.vartbl.borrow().len(), 1);
-				assert_eq!(block.stmts.borrow().len(), 6);
+				assert_eq!(block.stmts.borrow().len(), 7);
 				assert_eq!(block.vartbl.borrow()[0].name, "x");
 				assert_eq!(block.vartbl.borrow()[0].ty.base, IntTy);
 				assert_eq!(block.vartbl.borrow()[0].ty.array_lvl, 0);
@@ -554,6 +553,7 @@ class Foo {
 	    char d = 'e';
 	    c == d;
 	    c != d;
+	    return 0;
 	}
 }
 "#;
@@ -578,7 +578,7 @@ class Foo {
 				let body = method_a.body.borrow();
 				let block = body.as_ref().unwrap();
 				assert_eq!(block.vartbl.borrow().len(), 5);
-				assert_eq!(block.stmts.borrow().len(), 12);
+				assert_eq!(block.stmts.borrow().len(), 13);
 				assert_eq!(block.vartbl.borrow()[0].name, "x");
 				assert_eq!(block.vartbl.borrow()[0].ty.base, IntTy);
 				assert_eq!(block.vartbl.borrow()[0].ty.array_lvl, 0);
@@ -953,6 +953,7 @@ class Foo {
    	    x == 0 || x != 10;
 	    x > 0 || x < 10;
 	    x >= 0 || x <= 10;
+	    return 0;
 	}
 }
 "#;
@@ -978,7 +979,7 @@ class Foo {
 				let block = body.as_ref().unwrap();
 				{
 					assert_eq!(block.vartbl.borrow().len(), 5);
-					assert_eq!(block.stmts.borrow().len(), 15);
+					assert_eq!(block.stmts.borrow().len(), 16);
 					assert_eq!(block.vartbl.borrow()[0].name, "x");
 					assert_eq!(block.vartbl.borrow()[0].ty.base, IntTy);
 					assert_eq!(block.vartbl.borrow()[0].ty.array_lvl, 0);

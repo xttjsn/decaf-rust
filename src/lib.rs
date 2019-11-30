@@ -3,4 +3,6 @@
 mod lnp;
 mod decaf;
 mod treebuild;
+mod codegen;
 mod test;
+
