@@ -1,12 +1,22 @@
 extern crate llvm_sys;
+extern crate tempfile;
+
+use std::ffi::{CStr, CString};
 use std::collections::BTreeMap;
-use std::ptr;
-use std::ffi::CString;
+use llvm_sys::core::*;
 use llvm_sys::prelude::*;
-use CompileError::*;
+use llvm_sys::target::*;
+use llvm_sys::target_machine::*;
+use llvm_sys::transforms::pass_manager_builder::*;
 use crate::treebuild::DecafTreeBuilder;
-use self::llvm_sys::core::*;
-use self::decaf;
+use crate::decaf;
+use CompileError::*;
+
+use tempfile::NamedTempFile;
+use std::str;
+
+use std::ptr;
+use std::ptr::null_mut;
 
 pub const ADDRESS_SPACE_GENERIC: ::libc::c_uint = 0;
 pub const ADDRESS_SPACE_GLOBAL: ::libc::c_uint = 1;
@@ -98,6 +108,91 @@ pub enum CompileError {
 
 pub type GenCodeResult = Result<CodeValue, CompileError>;
 
+// TODO: implement new method for CompilerConstruct
+
+// Our function naming convention is simple: <ClassName> + "_" + <MethodName>
+fn convert_io_error<T>(result: Result<T, std::io::Error>) -> Result<T, String> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+fn get_default_target_triple() -> CString {
+    let target_triple;
+    unsafe {
+        let target_triple_ptr = LLVMGetDefaultTargetTriple();
+        target_triple = CStr::from_ptr(target_triple_ptr as *const _).to_owned();
+        LLVMDisposeMessage(target_triple_ptr);
+    }
+
+    target_triple
+}
+
+fn create_module(module_name: &str, target_triple: Option<String>) -> LLVMModuleRef {
+    let c_module_name = CString::new(module_name).unwrap();
+    let module_name_char_ptr = c_module_name.to_bytes_with_nul().as_ptr() as *const _;
+
+    let llvm_module;
+    unsafe {
+        llvm_module = LLVMModuleCreateWithName(module_name_char_ptr);
+    }
+
+    let target_triple_cstring = if let Some(target_triple) = target_triple {
+        CString::new(target_triple).unwrap()
+    } else {
+        get_default_target_triple()
+    };
+
+    // This is necessary for maximum LLVM performance, see
+    // http://llvm.org/docs/Frontend/PerformanceTips.html
+    unsafe {
+        LLVMSetTarget(llvm_module, target_triple_cstring.as_ptr() as *const _);
+    }
+
+    llvm_module
+}
+
+struct TargetMachine {
+	tm: LLVMTargetMachineRef,
+}
+
+impl TargetMachine {
+	fn new(target_triple: *const i8) -> Result<Self, String> {
+		let mut target = null_mut();
+        let mut err_msg_ptr = null_mut();
+		unsafe {
+			LLVMGetTargetFromTriple(target_triple, &mut target, &mut err_msg_ptr);
+			if target.is_null() {
+				// LLVM couldn't find a target triple with this name,
+                // so it should have given us an error message.
+				assert!(!err_msg_ptr.is_null());
+
+				let err_msg_cstr = CStr::from_ptr(err_msg_ptr as *const _);
+				let err_msg = str::from_utf8(err_msg_cstr.to_bytes()).unwrap();
+				return Err(err_msg.to_owned());
+			}
+		}
+
+		let cpu = CString::new("generic").unwrap();
+		let features = CString::new("").unwrap();
+
+		let target_machine;
+		unsafe {
+			target_machine = LLVMCreateTargetMachine(
+				target,
+				target_triple,
+				cpu.as_ptr() as *const _,
+				features.as_ptr() as *const _,
+				LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive,
+				LLVMRelocMode::LLVMRelocPIC, LLVMCodeModel::LLVMCodeModelDefault
+			);
+		}
+
+		Ok(TargetMachine { tm: target_machine })
+	}
+}
+
 pub struct CompilerConstruct {
     ctx: LLVMContextRef,
     builder: LLVMBuilderRef,
@@ -106,32 +201,17 @@ pub struct CompilerConstruct {
     functions_map: BTreeMap<String, LLVMValueRef>,
 }
 
-// TODO: implement new method for CompilerConstruct
-
-// Our function naming convention is simple: <ClassName> + "_" + <MethodName>
 
 impl CompilerConstruct {
-
-	fn new(module_name: &str, target_triple: Option<String>) -> Self {
-		let module_name_char_ptr = str_to_cstr(module_name);
-		let llvm_module;
-		unsafe {
-			llvm_module = LLVMModuleCreateWithName(module_name_char_ptr);
+	fn new(module_name: &str) -> Self {
+		let ctx = unsafe { LLVMContextCreate() };
+		CompilerConstruct {
+			ctx: ctx,
+			builder: unsafe { LLVMCreateBuilderInContext(ctx) },
+			module: create_module(module_name, None),
+			types_map: BTreeMap::new(),
+			functions_map: BTreeMap::new(),
 		}
-
-		let target_triple_cstring = if let Some(target_triple) = target_triple {
-			CString::new(target_triple).unwrap()
-		} else {
-			get_default_target_triple()
-		};
-
-		// This is necessary for maximum LLVM performance, see
-		// http://llvm.org/docs/Frontend/PerformanceTips.html
-		unsafe {
-			LLVMSetTarget(llvm_module, target_triple_cstring.as_ptr() as *const _);
-		}
-
-
 	}
 
     fn get_llvm_type_by_name(&self, name: &str) -> Option<LLVMTypeRef> {
@@ -174,10 +254,57 @@ impl CompilerConstruct {
             // Allocate memory
             let string_val = LLVMBuildMalloc(self.builder, self.get_llvm_type_by_name("String").unwrap(), name!(b"malloc_string"));
             // Copy string
-            let s_val = LLVMConstStringInContext(self.ctx, str_to_cstr(s), s.len() as u32, 1);
+            let s_val = LLVMConstStringInContext(self.ctx, str_to_cstr!(s), s.len() as u32, 1);
             let str_addr = LLVMBuildGEP2(self.builder, char_ptr_type!(self), string_val, indices!(0, 0), 2, name!(b"gep_str_from_String"));
             LLVMBuildStore(self.builder, s_val, str_addr);
             string_val
+		}
+	}
+
+	pub fn optimize(&mut self, llvm_opt: i64) {
+		unsafe {
+			let builder = LLVMPassManagerBuilderCreate();
+			LLVMPassManagerBuilderSetOptLevel(builder, llvm_opt as u32);
+
+			let pass_manager = LLVMCreatePassManager();
+			LLVMPassManagerBuilderPopulateModulePassManager(builder, pass_manager);
+
+			LLVMPassManagerBuilderDispose(builder);
+
+			LLVMRunPassManager(pass_manager, self.module);
+			// LLVMRunPassManager(pass_manager, self.module);
+
+			LLVMDisposePassManager(pass_manager);
+		}
+	}
+
+	pub fn output(&mut self) {
+		let object_file = match NamedTempFile::new() {
+			Ok(v) => v,
+			Err(e) => panic!("NamedTempFile::new: {}", e)
+		};
+
+		let obj_file_path = object_file.path().to_str().expect("path not valid utf-8");
+
+		unsafe {
+			let target_triple = LLVMGetTarget(self.module);
+			let target_machine = match TargetMachine::new(target_triple) {
+				Ok(m) => m,
+				Err(e) => panic!("TargetMachine::new : {}", e),
+			};
+
+			let mut obj_error = CString::new("Writing object file failed.").unwrap().as_ptr() as *mut _;
+			let result = LLVMTargetMachineEmitToFile(
+				target_machine.tm,
+				self.module,
+				str_to_cstr!("test.o"),
+				LLVMCodeGenFileType::LLVMObjectFile,
+				&mut obj_error
+			);
+
+			if result != 0 {
+				panic!("obj_error: {:?}", CStr::from_ptr(obj_error as *const _));
+			}
 		}
 	}
 
@@ -329,6 +456,7 @@ impl CompilerConstruct {
         }
         //
     }
+
 }
 
 trait CodeGen {
@@ -341,10 +469,8 @@ impl CodeGen for DecafTreeBuilder {
         construct.gen_builtin();
 
 		for (_, cls) in &self.class_map {
-			cls.gencode(construct).unwrap()
+			cls.gencode(construct).unwrap();
 		}
-
-		// Optimize
 
 		Err(NotImplemented)
     }
