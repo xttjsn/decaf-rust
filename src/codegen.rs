@@ -8,8 +8,9 @@ use llvm_sys::prelude::*;
 use llvm_sys::target::*;
 use llvm_sys::target_machine::*;
 use llvm_sys::transforms::pass_manager_builder::*;
-use crate::treebuild::DecafTreeBuilder;
+use crate::treebuild::{DecafTreeBuilder, Program};
 use crate::decaf;
+use crate::shell;
 use CompileError::*;
 
 use tempfile::NamedTempFile;
@@ -17,19 +18,22 @@ use std::str;
 
 use std::ptr;
 use std::ptr::null_mut;
+use crate::lnp::lexer::Token::Not;
 
 pub const ADDRESS_SPACE_GENERIC: ::libc::c_uint = 0;
 pub const ADDRESS_SPACE_GLOBAL: ::libc::c_uint = 1;
 pub const ADDRESS_SPACE_SHARED: ::libc::c_uint = 3;
 pub const ADDRESS_SPACE_CONST: ::libc::c_uint = 4;
 pub const ADDRESS_SPACE_LOCAL: ::libc::c_uint = 5;
-pub const IO_PUT_CHAR_NAME: *const ::libc::c_char = b"IO_putChar_inner".as_ptr() as *const _;
-pub const IO_PUT_STRING_NAME: *const ::libc::c_char = b"IO_putString_inner".as_ptr() as *const _;
-pub const IO_PUT_INT_NAME: *const ::libc::c_char = b"IO_putInt_inner".as_ptr() as *const _;
-pub const IO_GET_CHAR_NAME: *const ::libc::c_char = b"IO_getChar_inner".as_ptr() as *const _;
-pub const IO_GET_INT_NAME: *const ::libc::c_char = b"IO_getInt_inner".as_ptr() as *const _;
-pub const IO_GET_LINE_NAME: *const ::libc::c_char = b"IO_getLine_inner".as_ptr() as *const _;
-pub const IO_PEEK_NAME: *const ::libc::c_char = b"IO_peek_inner".as_ptr() as *const _;
+pub const IO_PUT_CHAR_NAME: *const ::libc::c_char = b"IO_putChar_inner\0".as_ptr() as *const _;
+pub const IO_PUT_STRING_NAME: *const ::libc::c_char = b"IO_putString_inner\0".as_ptr() as *const _;
+pub const IO_PUT_INT_NAME: *const ::libc::c_char = b"IO_putInt_inner\0".as_ptr() as *const _;
+pub const IO_GET_CHAR_NAME: *const ::libc::c_char = b"IO_getChar_inner\0".as_ptr() as *const _;
+pub const IO_GET_INT_NAME: *const ::libc::c_char = b"IO_getInt_inner\0".as_ptr() as *const _;
+pub const IO_GET_LINE_NAME: *const ::libc::c_char = b"IO_getLine_inner\0".as_ptr() as *const _;
+pub const IO_PEEK_NAME: *const ::libc::c_char = b"IO_peek_inner\0".as_ptr() as *const _;
+const LLVM_FALSE: LLVMBool = 0;
+const LLVM_TRUE: LLVMBool = 1;
 
 macro_rules! char_type {
       () => {
@@ -88,6 +92,12 @@ macro_rules! params {
     })
 }
 
+macro_rules! str_to_cstr_mut_ptr {
+	($s: expr) => {
+        CString::new($s).unwrap().as_ptr() as *mut _
+	}
+}
+
 macro_rules! str_to_cstr {
 	($s: expr) => {
 		CString::new($s).unwrap().to_bytes_with_nul().as_ptr() as *const _
@@ -108,17 +118,9 @@ pub enum CompileError {
 
 pub type GenCodeResult = Result<CodeValue, CompileError>;
 
-// TODO: implement new method for CompilerConstruct
-
 // Our function naming convention is simple: <ClassName> + "_" + <MethodName>
-fn convert_io_error<T>(result: Result<T, std::io::Error>) -> Result<T, String> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(e) => Err(format!("{}", e)),
-    }
-}
 
-fn get_default_target_triple() -> CString {
+pub fn get_default_target_triple() -> CString {
     let target_triple;
     unsafe {
         let target_triple_ptr = LLVMGetDefaultTargetTriple();
@@ -127,6 +129,23 @@ fn get_default_target_triple() -> CString {
     }
 
     target_triple
+}
+
+pub fn llvm_module_to_cstring(module: LLVMModuleRef) -> CString {
+    unsafe {
+        // LLVM gives us a *char pointer, so wrap it in a CStr to mark it
+        // as borrowed.
+        let llvm_ir_ptr = LLVMPrintModuleToString(module);
+        let llvm_ir = CStr::from_ptr(llvm_ir_ptr as *const _);
+
+        // Make an owned copy of the string in our memory space.
+        let module_string = CString::new(llvm_ir.to_bytes()).unwrap();
+
+        // Cleanup borrowed string.
+        LLVMDisposeMessage(llvm_ir_ptr);
+
+        module_string
+    }
 }
 
 fn create_module(module_name: &str, target_triple: Option<String>) -> LLVMModuleRef {
@@ -193,36 +212,61 @@ impl TargetMachine {
 	}
 }
 
-pub struct CompilerConstruct {
+impl Drop for TargetMachine {
+    fn drop(&mut self) {
+        unsafe {
+            LLVMDisposeTargetMachine(self.tm);
+        }
+    }
+}
+
+pub struct CodeGenerator {
     ctx: LLVMContextRef,
     builder: LLVMBuilderRef,
     module: LLVMModuleRef,
     types_map: BTreeMap<String, LLVMTypeRef>,
     functions_map: BTreeMap<String, LLVMValueRef>,
+	target_triple: Option<String>,
+	llvm_inited: bool,
+	strings: Vec<CString>,
+}
+
+pub fn new_generator(module_name: &str, target_triple: Option<String>) -> CodeGenerator {
+	CodeGenerator::new(module_name, target_triple)
 }
 
 
-impl CompilerConstruct {
-	fn new(module_name: &str) -> Self {
+impl CodeGenerator {
+	fn new(module_name: &str, target_triple: Option<String>) -> Self {
 		let ctx = unsafe { LLVMContextCreate() };
-		CompilerConstruct {
+		CodeGenerator {
 			ctx: ctx,
 			builder: unsafe { LLVMCreateBuilderInContext(ctx) },
-			module: create_module(module_name, None),
+			module: create_module(module_name, target_triple.clone()),
 			types_map: BTreeMap::new(),
 			functions_map: BTreeMap::new(),
+			target_triple,
+			llvm_inited: false,
+			strings: Vec::new(),
 		}
 	}
 
-    fn get_llvm_type_by_name(&self, name: &str) -> Option<LLVMTypeRef> {
+    fn get_llvm_type_by_name(&self, name: &str, want_ptr: bool) -> Option<LLVMTypeRef> {
         match self.types_map.get(name.into()) {
             None => None,
-            Some(t) => Some(t.clone())
+            Some(t) => {
+                if want_ptr {
+                    Some(unsafe { LLVMPointerType(t.clone(), ADDRESS_SPACE_GENERIC) })
+                } else {
+                    Some(t.clone())
+                }
+
+            }
         }
     }
 
     fn add_llvm_type(&mut self, name: &str, ty: LLVMTypeRef) -> Result<(), CompileError> {
-        match self.get_llvm_type_by_name(name) {
+        match self.get_llvm_type_by_name(name, false) {
             None => {
                 self.types_map.insert(name.into(), ty);
                 Ok(())
@@ -248,17 +292,29 @@ impl CompilerConstruct {
         }
     }
 
-	fn new_string(&self, s: &str) -> LLVMValueRef {
-		// Create a String class and return the value of it
+	fn new_string_class(&self, s: &str) -> LLVMValueRef {
+		// Create a String object and return the value of it
 		unsafe {
             // Allocate memory
-            let string_val = LLVMBuildMalloc(self.builder, self.get_llvm_type_by_name("String").unwrap(), name!(b"malloc_string"));
+            let string_val = LLVMBuildMalloc(self.builder, self.get_llvm_type_by_name("String", false).unwrap(), name!(b"malloc_string\0"));
             // Copy string
             let s_val = LLVMConstStringInContext(self.ctx, str_to_cstr!(s), s.len() as u32, 1);
-            let str_addr = LLVMBuildGEP2(self.builder, char_ptr_type!(self), string_val, indices!(0, 0), 2, name!(b"gep_str_from_String"));
+            // TODO: allocate ?
+            let str_addr = LLVMBuildGEP2(self.builder, char_ptr_type!(self), string_val, indices!(0, 0), 2, name!(b"gep_str_from_String\0"));
             LLVMBuildStore(self.builder, s_val, str_addr);
             string_val
 		}
+	}
+
+	pub fn new_string_ptr(&mut self, s: &str) -> *const i8 {
+		self.new_mut_string_ptr(s)
+	}
+
+	pub fn new_mut_string_ptr(&mut self, s: &str) -> *mut i8 {
+		let cstring = CString::new(s).unwrap();
+		let ptr = cstring.as_ptr() as *mut _;
+		self.strings.push(cstring);
+		ptr
 	}
 
 	pub fn optimize(&mut self, llvm_opt: i64) {
@@ -278,34 +334,31 @@ impl CompilerConstruct {
 		}
 	}
 
-	pub fn output(&mut self) {
+	pub fn write_object_file(&mut self, path: &str) -> Result<(), String> {
 		let object_file = match NamedTempFile::new() {
 			Ok(v) => v,
 			Err(e) => panic!("NamedTempFile::new: {}", e)
 		};
 
-		let obj_file_path = object_file.path().to_str().expect("path not valid utf-8");
-
 		unsafe {
 			let target_triple = LLVMGetTarget(self.module);
-			let target_machine = match TargetMachine::new(target_triple) {
-				Ok(m) => m,
-				Err(e) => panic!("TargetMachine::new : {}", e),
-			};
+			let target_machine = TargetMachine::new(target_triple)?;
 
-			let mut obj_error = CString::new("Writing object file failed.").unwrap().as_ptr() as *mut _;
+			let mut obj_error = self.new_mut_string_ptr("Writing object file failed.");
 			let result = LLVMTargetMachineEmitToFile(
 				target_machine.tm,
 				self.module,
-				str_to_cstr!("test.o"),
+				self.new_string_ptr(path) as *mut i8,
 				LLVMCodeGenFileType::LLVMObjectFile,
-				&mut obj_error
+				&mut obj_error,
 			);
 
 			if result != 0 {
 				panic!("obj_error: {:?}", CStr::from_ptr(obj_error as *const _));
 			}
 		}
+
+		Ok(())
 	}
 
     fn gen_builtin(&mut self) {
@@ -342,11 +395,11 @@ impl CompilerConstruct {
 
                 // Called by decaf code
                 let put_char_ty = LLVMFunctionType(void_type!(), params!(char_type!()), 1, 0);
-                let put_char_val = LLVMAddFunction(self.module, name!(b"IO_putChar"), put_char_ty);
-                let put_char_bb = LLVMAppendBasicBlockInContext(self.ctx, put_char_val, name!(b"IO_putChar_main"));
+                let put_char_val = LLVMAddFunction(self.module, name!(b"IO_putChar\0"), put_char_ty);
+                let put_char_bb = LLVMAppendBasicBlockInContext(self.ctx, put_char_val, name!(b"IO_putChar_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, put_char_bb);
                 let char_param_val = LLVMGetFirstParam(put_char_val);
-                LLVMBuildCall2(self.builder, void_type!(), put_char_inner_val, params!(char_param_val), 1, name!(b"invoke_put_char_inner"));
+                LLVMBuildCall(self.builder, put_char_inner_val, params!(char_param_val), 1, name!(b"\0"));
 
                 self.add_function("IO_putChar", put_char_val).unwrap();
             }
@@ -358,18 +411,17 @@ impl CompilerConstruct {
                 let put_string_inner_val = LLVMAddFunction(self.module, IO_PUT_STRING_NAME, put_string_inner_ty);
 
                 // Wrapper method
-                let put_string_ty = LLVMFunctionType(void_type!(), params!(self.get_llvm_type_by_name("String").unwrap()), 1, 0);
-                let put_string_val = LLVMAddFunction(self.module, name!(b"IO_putString"), put_string_ty);
-                let put_string_bb = LLVMAppendBasicBlockInContext(self.ctx, put_string_val, name!(b"IO_putString_main"));
+                let put_string_ty = LLVMFunctionType(void_type!(), params!(self.get_llvm_type_by_name("String", true).unwrap()), 1, 0);
+                let put_string_val = LLVMAddFunction(self.module, name!(b"IO_putString\0"), put_string_ty);
+                let put_string_bb = LLVMAppendBasicBlockInContext(self.ctx, put_string_val, name!(b"IO_putString_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, put_string_bb);
                 let string_param_val = LLVMGetFirstParam(put_string_val);
                 // Extract the str field
-                let str_addr = LLVMBuildGEP2(self.builder, char_ptr_type!(self), string_param_val, indices!(0, 0), 2, name!(b"gep_str_from_String"));
+                let str_addr = LLVMBuildGEP(self.builder, string_param_val, indices!(0, 0), 2, name!(b"gep_str_from_String\0"));
                 // Load the pointer address
-                let str_val = LLVMBuildLoad2(self.builder, char_ptr_type!(self), str_addr, name!(b"load_str_val"));
+                let str_val = LLVMBuildLoad2(self.builder, char_ptr_type!(self), str_addr, name!(b"load_str_val\0"));
                 // Call the runtime
-                LLVMBuildCall2(self.builder, void_type!(), put_string_inner_val, params!(str_val), 1, name!(b"invoke_put_string_inner"));
-
+                LLVMBuildCall(self.builder, put_string_inner_val, params!(str_val), 1, name!(b"\0"));
                 self.add_function("IO_putString", put_string_val).unwrap();
             }
 
@@ -381,11 +433,11 @@ impl CompilerConstruct {
 
                 // Wrapper method
                 let put_int_ty = LLVMFunctionType(void_type!(), params!(int_type!()), 1, 0);
-                let put_int_val = LLVMAddFunction(self.module, name!(b"IO_putInt"), put_int_ty);
-                let put_int_bb = LLVMAppendBasicBlockInContext(self.ctx, put_int_val, name!(b"IO_putInt_main"));
+                let put_int_val = LLVMAddFunction(self.module, name!(b"IO_putInt\0"), put_int_ty);
+                let put_int_bb = LLVMAppendBasicBlockInContext(self.ctx, put_int_val, name!(b"IO_putInt_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, put_int_bb);
                 let int_param_val = LLVMGetFirstParam(put_int_val);
-                LLVMBuildCall2(self.builder, void_type!(), put_int_inner_val, params!(int_param_val), 1, name!(b"invoke_putInt_inner"));
+                LLVMBuildCall(self.builder,put_int_inner_val, params!(int_param_val), 1, name!(b"\0"));
 
                 self.add_function("IO_putInt", put_int_val).unwrap();
             }
@@ -398,26 +450,36 @@ impl CompilerConstruct {
 
                 // Called by decaf code
                 let get_char_ty = LLVMFunctionType(char_type!(), null!(), 0, 0);
-                let get_char_val = LLVMAddFunction(self.module, name!(b"IO_getChar"), get_char_ty);
-                let get_char_bb = LLVMAppendBasicBlockInContext(self.ctx, get_char_val, name!(b"IO_getChar_main"));
+                let get_char_val = LLVMAddFunction(self.module, name!(b"IO_getChar\0"), get_char_ty);
+                let get_char_bb = LLVMAppendBasicBlockInContext(self.ctx, get_char_val, name!(b"IO_getChar_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, get_char_bb);
-                LLVMBuildCall2(self.builder, char_type!(), get_char_inner_val, null!(), 0, name!(b"invoke_get_char_inner"));
-
+                let char_val = LLVMBuildCall(self.builder, get_char_inner_val, null!(), 0, name!(b"inner_char\0"));
+                LLVMBuildRet(self.builder, char_val);
                 self.add_function("IO_getChar", get_char_val).unwrap();
             }
 
             // getLine
             {
+                // Note: Runtime should make sure the char array is always alive because we are not going to make copy
                 // Interface of Runtime
                 let get_line_inner_ty = LLVMFunctionType(char_ptr_type!(self), null!(), 0, 0);
                 let get_line_inner_val = LLVMAddFunction(self.module, IO_GET_LINE_NAME, get_line_inner_ty);
 
                 // Called by decaf code
-                let get_line_ty = LLVMFunctionType(char_ptr_type!(self), null!(), 0, 0);
-                let get_line_val = LLVMAddFunction(self.module, name!(b"IO_getLine"), get_line_ty);
-                let get_line_bb = LLVMAppendBasicBlockInContext(self.ctx, get_line_val, name!(b"IO_getLine_main"));
+                let get_line_ty = LLVMFunctionType(self.get_llvm_type_by_name("String", true).unwrap(), null!(), 0, 0);
+                let get_line_val = LLVMAddFunction(self.module, name!(b"IO_getLine\0"), get_line_ty);
+                let get_line_bb = LLVMAppendBasicBlockInContext(self.ctx, get_line_val, name!(b"IO_getLine_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, get_line_bb);
-                LLVMBuildCall2(self.builder, char_ptr_type!(self), get_line_inner_val, null!(), 0, name!(b"invoke_get_line_inner"));
+                let inner_line = LLVMBuildCall(self.builder, get_line_inner_val, null!(), 0, name!(b"inner_line\0"));
+
+                // Construct a String class
+                // Allocate memory
+                let string_val = LLVMBuildMalloc(self.builder, self.get_llvm_type_by_name("String", false).unwrap(), name!(b"malloc_string\0"));
+                println!("type of string_val: ");
+                LLVMDumpType(LLVMTypeOf(string_val));
+                let str_addr = LLVMBuildGEP(self.builder, string_val, indices!(0, 0), 2, name!(b"String_field_str\0"));
+                LLVMBuildStore(self.builder, inner_line, str_addr);
+                LLVMBuildRet(self.builder, string_val);
 
                 self.add_function("IO_getLine", get_line_val).unwrap();
             }
@@ -430,10 +492,11 @@ impl CompilerConstruct {
 
                 // Called by decaf code
                 let get_int_ty = LLVMFunctionType(int_type!(), null!(), 0, 0);
-                let get_int_val = LLVMAddFunction(self.module, name!(b"IO_getInt"), get_int_ty);
-                let get_int_bb = LLVMAppendBasicBlockInContext(self.ctx, get_int_val, name!(b"IO_getInt_main"));
+                let get_int_val = LLVMAddFunction(self.module, name!(b"IO_getInt\0"), get_int_ty);
+                let get_int_bb = LLVMAppendBasicBlockInContext(self.ctx, get_int_val, name!(b"IO_getInt_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, get_int_bb);
-                LLVMBuildCall2(self.builder, int_type!(), get_int_inner_val, null!(), 0, name!(b"invoke_get_int_inner"));
+                let inner_int = LLVMBuildCall(self.builder,get_int_inner_val, null!(), 0, name!(b"inner_int\0"));
+                LLVMBuildRet(self.builder, inner_int);
 
                 self.add_function("IO_getInt", get_int_val).unwrap();
             }
@@ -446,57 +509,110 @@ impl CompilerConstruct {
 
                 // Called by decaf code
                 let peek_ty = LLVMFunctionType(char_type!(), null!(), 0, 0);
-                let peek_val = LLVMAddFunction(self.module, name!(b"IO_peek"), peek_ty);
-                let peek_bb = LLVMAppendBasicBlockInContext(self.ctx, peek_val, name!(b"IO_peek_main"));
+                let peek_val = LLVMAddFunction(self.module, name!(b"IO_peek\0"), peek_ty);
+                let peek_bb = LLVMAppendBasicBlockInContext(self.ctx, peek_val, name!(b"IO_peek_main\0"));
                 LLVMPositionBuilderAtEnd(self.builder, peek_bb);
-                LLVMBuildCall2(self.builder, char_type!(), peek_inner_val, null!(), 0, name!(b"invoke_peek_inner"));
+                let peek_char = LLVMBuildCall(self.builder, peek_inner_val, null!(), 0, name!(b"peek_char\0"));
+                LLVMBuildRet(self.builder, peek_char);
 
                 self.add_function("IO_peek", peek_val).unwrap();
             }
         }
-        //
     }
+
+	fn init_llvm(&mut self) {
+		if !self.llvm_inited {
+			unsafe {
+				// TODO: are all these necessary? Are there docs?
+				LLVM_InitializeAllTargetInfos();
+				LLVM_InitializeAllTargets();
+				LLVM_InitializeAllTargetMCs();
+				LLVM_InitializeAllAsmParsers();
+				LLVM_InitializeAllAsmPrinters();
+			}
+			self.llvm_inited = true;
+		}
+	}
+
+	fn add_main_fn(&mut self) {
+		let mut main_args = vec![];
+		unsafe {
+			let main_ty = LLVMFunctionType(int_type!(), main_args.as_mut_ptr(), 0, LLVM_FALSE);
+			LLVMAddFunction(self.module, self.new_string_ptr("main"), main_ty);
+		}
+	}
+
+	pub fn link_object_file(&self,
+							object_file_path: &str,
+							executable_path: &str
+	) -> Result<(), String> {
+		// Link the object file
+		let clang_args = if let Some(ref target_triple) = self.target_triple {
+			vec![
+				object_file_path,
+				"-target",
+				&target_triple,
+				"-o",
+				&executable_path[..],
+			]
+		} else {
+			vec![object_file_path, "-o", &executable_path[..]]
+		};
+
+		shell::run_shell_command("clang", &clang_args[..])
+	}
+
+	pub fn compile_to_module(&mut self, program: &Program) -> Result<LLVMModuleRef, String> {
+		self.init_llvm();
+		self.gen_builtin();
+		self.add_main_fn();
+
+        for cls in program.classes {
+            match cls.gencode(self) {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(format!("Compile error {:?}", e));
+                }
+            }
+        }
+
+		Ok(self.module.clone())
+	}
 
 }
 
 trait CodeGen {
-    fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult;
-}
-
-impl CodeGen for DecafTreeBuilder {
-    fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult {
-        // gencode for builtin class.
-        construct.gen_builtin();
-
-		for (_, cls) in &self.class_map {
-			cls.gencode(construct).unwrap();
-		}
-
-		Err(NotImplemented)
-    }
+    fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult;
 }
 
 impl CodeGen for decaf::Class {
-	fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult {
+	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
+        // Define types for the current class
+        // This requires knowing all the fields
+        // Also add a pointer to vtable
+        // TODO: use Metadata
+//        let vtable_ptr_ty = LLVMPo
+//        let cls_llvm_ty = LLVMStructType(params!())
 
-		Err(NotImplemented)
+        // For each method, invoke gencode on it
+        Err(NotImplemented)
 	}
 }
 
 impl CodeGen for decaf::Method {
-	fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult {
+	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
 		Err(NotImplemented)
 	}
 }
 
 impl CodeGen for decaf::Stmt {
-	fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult {
+	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
 		Err(NotImplemented)
 	}
 }
 
 impl CodeGen for decaf::Expr {
-	fn gencode(&self, construct: &mut CompilerConstruct) -> GenCodeResult {
+	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
 		Err(NotImplemented)
 	}
 }

@@ -6,6 +6,7 @@ use crate::decaf;
 use crate::decaf::{Returnable, Value};
 use crate::decaf::Scope::WhileScope;
 use crate::lnp;
+use crate::lnp::lexer::Token::IntLit;
 
 macro_rules! debug {
 () => (println!());
@@ -120,7 +121,7 @@ pub enum SemanticError {
 	EDimExprNotArithType,
 	EVoidArray,
 	ENoCompatibleCtor,
-	ENoCompatibleMethod,
+	ENoCompatibleMethod(String),
 	EArrayTypeNotSupportMethodCall,
 	ENonClassTypeNotSupportMethodCall,
 	ESuperCallWithoutClass,
@@ -169,7 +170,7 @@ impl Normalize for lnp::past::Method {
 	type Result = (decaf::TypeBase, u32, String, Vec<(String, decaf::TypeBase, u32)>, lnp::past::Block);
 
 	fn normalize(&self) -> Self::Result {
-		use crate::lnp::past::VarDeclaratorIdInner::*;
+		use lnp::past::VarDeclaratorIdInner::*;
 		// Return type
 		let (array_lvl, return_type) = ty2ty(&self.ty, 0);
 
@@ -194,7 +195,7 @@ impl Normalize for lnp::past::Ctor {
 	type Result = (Vec<(String, decaf::TypeBase, u32)>, lnp::past::Block);
 
 	fn normalize(&self) -> Self::Result {
-		use crate::lnp::past::VarDeclaratorIdInner::*;
+		use lnp::past::VarDeclaratorIdInner::*;
 		let mut args = vec![];
 		for arg in self.fargs.farg_list.iter() {
 			let (arg_array_lvl, arg_type) = ty2ty(&arg.ty, 0);
@@ -315,6 +316,10 @@ pub enum BuilderResult {
 
 type DecafClassHook = Box<dyn FnMut(Rc<decaf::Class>) -> Option<Rc<decaf::Class>>>;
 
+pub struct Program {
+	pub classes: Vec<Rc<decaf::Class>>,
+}
+
 pub struct DecafTreeBuilder {
 	pub state: BuilderState,
 	pub scopes: Vec<decaf::Scope>,
@@ -360,14 +365,14 @@ impl ASTBuilder for DecafTreeBuilder {
 							Some(cls_base_ty) => {
 								Some(Type{
 									base: ClassTy(cls_base_ty.clone()),
-									array_lvl: array_lvl,
+									array_lvl,
 								})
 							}
 						}
 					},
 					BoolTy | IntTy | CharTy  => Some(Type {
 						base: base_ty,
-						array_lvl: array_lvl,
+						array_lvl,
 					}),
 					VoidTy => {
 						if array_lvl != 0 {
@@ -380,11 +385,15 @@ impl ASTBuilder for DecafTreeBuilder {
 					},
 					ClassTy(cls) => Some(Type {
 						base: ClassTy(cls.clone()),
-						array_lvl: array_lvl,
+						array_lvl,
 					}),
 					NULLTy => Some(Type {
 						base: NULLTy,
-						array_lvl: array_lvl,
+						array_lvl,
+					}),
+					StrTy => Some(Type {
+						base: StrTy,
+						array_lvl,
 					})
 				}
 			},
@@ -558,6 +567,10 @@ impl ASTBuilder for DecafTreeBuilder {
 				base: VoidTy,
 				array_lvl: 0,
 			});
+			*put_char.args.borrow_mut() = vec![("char".to_string(), Rc::new(Type {
+				base: CharTy,
+				array_lvl: 0,
+			}))];
 
 			let put_string = Method::new("putString".to_string(), iocls.clone());
 			*put_string.stat.borrow_mut() = true;
@@ -565,6 +578,10 @@ impl ASTBuilder for DecafTreeBuilder {
 				base: VoidTy,
 				array_lvl: 0,
 			});
+			*put_string.args.borrow_mut() = vec![("str".to_string(), Rc::new(Type {
+				base: ClassTy(strcls.clone()),
+				array_lvl: 0,
+			}))];
 
 			let put_int = Method::new("putInt".to_string(), iocls.clone());
 			*put_int.stat.borrow_mut() = true;
@@ -572,6 +589,10 @@ impl ASTBuilder for DecafTreeBuilder {
 				base: VoidTy,
 				array_lvl: 0,
 			});
+			*put_int.args.borrow_mut() = vec![("int".to_string(), Rc::new(Type {
+				base: IntTy,
+				array_lvl: 0,
+			}))];
 
 			let get_char = Method::new("getChar".to_string(), iocls.clone());
 			*get_char.stat.borrow_mut() = true;
@@ -747,7 +768,7 @@ impl Visitor for DecafTreeBuilder {
 		use self::BuilderState::*;
 		use self::BuilderResult::*;
 		use crate::decaf::TypeBase::*;
-		use crate::lnp::past::Modifier::*;
+		use lnp::past::Modifier::*;
 
 		match &self.state {
 			First => {
@@ -839,7 +860,7 @@ impl Visitor for DecafTreeBuilder {
 		use self::BuilderResult::*;
 		use crate::decaf::Type;
 		use crate::decaf::TypeBase::*;
-		use crate::lnp::past::Modifier::*;
+		use lnp::past::Modifier::*;
 		use crate::decaf::Visibility::*;
 		use crate::decaf::Scope::*;
 		match self.state {
@@ -960,8 +981,25 @@ impl Visitor for DecafTreeBuilder {
 									panic!("second modifer must be static");
 								}
 							},
-							_ => {
-								panic!("first modifier must not be static (when there are two modifiers)");
+							ModStatic(_) => {
+								match mthd.modies[1] {
+									ModPublic(_) => {
+										*method_node.vis.borrow_mut() = Pub;
+										*method_node.stat.borrow_mut() = true;
+										curr_cls.pub_static_methods.borrow_mut().push(method_node);
+									}
+									ModPrivate(_) => {
+										*method_node.vis.borrow_mut() = Priv;
+										*method_node.stat.borrow_mut() = true;
+										curr_cls.priv_static_methods.borrow_mut().push(method_node);
+									}
+									ModProtected(_) => {
+										*method_node.vis.borrow_mut() = Prot;
+										*method_node.stat.borrow_mut() = true;
+										curr_cls.prot_static_methods.borrow_mut().push(method_node);
+									}
+									_ => panic!("cannot have more than one static modifiers"),
+								}
 							}
 						}
 					}
@@ -977,7 +1015,7 @@ impl Visitor for DecafTreeBuilder {
 				let cls = self.get_curr_scope_as_class();
 
 				// Normalize method
-				let (return_ty, array_lvl, _name, args, _block) = mthd.normalize();
+				let (return_ty, array_lvl, name, mut args, _block) = mthd.normalize();
 				let is_static = mthd.modies.iter().any(|x| {
 					if let ModStatic(_) = x {
 						true
@@ -986,8 +1024,14 @@ impl Visitor for DecafTreeBuilder {
 					}
 				});
 
+				// Resolve args
+				args = args.into_iter().map(|(name, ty_base, array_lvl)| (name, match ty_base {
+					UnknownTy(cls_name) => ClassTy(self.class_lookup(cls_name).unwrap()),
+					_ => ty_base,
+				}, array_lvl)).collect();
+
 				// Get current method
-				let method = cls.get_method_by_signature(&return_ty, array_lvl, &args, is_static).unwrap();
+				let method = cls.get_method_by_signature(&return_ty, array_lvl, &args, is_static, &name).unwrap();
 
 				// Push new scope
 				self.scopes.push(MethodScope(method.clone()));
@@ -1036,9 +1080,9 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result {
 		use SemanticError::*;
 		use self::BuilderResult::*;
-		use crate::lnp::past::Expr::*;
-		use crate::lnp::past::BinOp::*;
-		use crate::lnp::past::UnOp::*;
+		use lnp::past::Expr::*;
+		use lnp::past::BinOp::*;
+		use lnp::past::UnOp::*;
 		use crate::decaf::{AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
 						   UnNotExpr};
 		use crate::decaf::Expr::*;
@@ -1161,7 +1205,7 @@ impl Visitor for DecafTreeBuilder {
 		use self::BuilderResult::*;
 		use crate::decaf::Type;
 		use crate::decaf::TypeBase::*;
-		use crate::lnp::past::Modifier::*;
+		use lnp::past::Modifier::*;
 		use crate::decaf::Visibility::*;
 		use crate::decaf::Scope::*;
 		match self.state {
@@ -1276,7 +1320,7 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result {
 		use self::BuilderResult::*;
 		use self::BuilderState::*;
-		use crate::lnp::past::Stmt::*;
+		use lnp::past::Stmt::*;
 		use crate::decaf::Stmt::*;
 		use SemanticError::*;
 		match self.state {
@@ -1614,9 +1658,9 @@ impl Visitor for DecafTreeBuilder {
 		use SemanticError::*;
 		use self::BuilderState::*;
 		use self::BuilderResult::*;
-		use crate::lnp::past::Prim::*;
-		use crate::lnp::past::PrimitiveType::*;
-		use crate::lnp::past::NAExpr::*;
+		use lnp::past::Prim::*;
+		use lnp::past::PrimitiveType::*;
+		use lnp::past::NAExpr::*;
 		use crate::decaf::TypeBase::*;
 		use crate::decaf::{CreateArrayExpr, ClassIdExpr, VariableExpr};
 		use crate::decaf::Expr::*;
@@ -1706,10 +1750,10 @@ impl Visitor for DecafTreeBuilder {
 	fn visit_nnaexpr(&mut self, nnaexpr: &lnp::past::NNAExpr) -> Self::Result {
 		use self::BuilderState::*;
 		use self::BuilderResult::*;
-		use crate::lnp::past::Litr::*;
-		use crate::lnp::past::NNAExpr::*;
-		use crate::lnp::past::AExpr::*;
-		use crate::lnp::past::FExpr::*;
+		use lnp::past::Litr::*;
+		use lnp::past::NNAExpr::*;
+		use lnp::past::AExpr::*;
+		use lnp::past::FExpr::*;
 		use crate::decaf::TypeBase::*;
 		use crate::decaf::Scope::*;
 		use crate::decaf::{CreateObjExpr, MethodCallExpr, SuperCallExpr,
@@ -1726,10 +1770,23 @@ impl Visitor for DecafTreeBuilder {
 							Null => Ok(ExprNode(NULL)),
 							Bool(ref b) => Ok(ExprNode(Literal(BoolLiteral(b.clone())))),
 							Char(ref c) => Ok(ExprNode(Literal(CharLiteral(c.clone())))),
-							Str(ref s) => Ok(ExprNode(Literal(StrLiteral(s.clone())))),
 							Int(ref i) => Ok(ExprNode(Literal(IntLiteral(i.clone())))),
+							Str(ref s) => {
+								match self.class_lookup("String".to_string()) {
+									Some(cls) => {
+										let lit = Literal(StrLiteral(s.clone()));
+										let arg_expr = vec![lit];
+										Ok(ExprNode(CreateObj(CreateObjExpr {
+											cls,
+											ctor: None,
+											args: arg_expr,
+										})))
+									}
+									None => panic!("String class not found"),
+									}
+								}
+							}
 						}
-					}
 					JustThis => self.visit_this(),
 					JustExpr(expr) => expr.accept(self),
 					NewObj(id, args) => {
@@ -1744,8 +1801,8 @@ impl Visitor for DecafTreeBuilder {
 										cls.get_compatible_level1_ctor(&arg_exprs)
 									} {
 										Some(ctor) => Ok(ExprNode(CreateObj(CreateObjExpr {
-											cls: cls,
-											ctor: ctor,
+											cls,
+											ctor: Some(ctor),
 											args: arg_exprs,
 										}))),
 										None => Err(ENoCompatibleCtor),
@@ -1763,7 +1820,7 @@ impl Visitor for DecafTreeBuilder {
 								// Lookup the method
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
-										match cls.get_compatible_level0_method(&arg_exprs) {
+										match cls.get_compatible_level0_method(&arg_exprs, id) {
 											Some(method) => {
 												if method.name == *id {
 													Ok(ExprNode(MethodCall(MethodCallExpr {
@@ -1781,10 +1838,10 @@ impl Visitor for DecafTreeBuilder {
 													})))
 												}
 												else {
-													Err(ENoCompatibleMethod)
+													Err(ENoCompatibleMethod(id.clone()))
 												}
 											},
-											None => Err(ENoCompatibleMethod)
+											None => Err(ENoCompatibleMethod(id.clone()))
 										}
 									},
 									_ => Err(EMethodCallWithoutClass),
@@ -1798,14 +1855,22 @@ impl Visitor for DecafTreeBuilder {
 							Ok(VecExpr(arg_exprs)) => {
 								match nprim.accept(self) {
 									Ok(ExprNode(prim_expr)) => {
+//										println!("arg_exprs.len() : {}", arg_exprs.len());
+//										if arg_exprs.len() > 0 {
+//											println!("arg_exprs[0] type: {:?}", arg_exprs[0].get_type());
+//										}
+
 										match prim_expr {
 											ClassId(cls_id_expr) => {
 												match if self.has_class_in_scope_stack(&cls_id_expr.cls) {
-													cls_id_expr.cls.get_compatible_level0_static_method(&arg_exprs)
+													cls_id_expr.cls.get_compatible_level0_static_method(&arg_exprs, id)
 												} else {
-													cls_id_expr.cls.get_compatible_level1_static_method(&arg_exprs)
+													cls_id_expr.cls.get_compatible_level1_static_method(&arg_exprs, id)
 												} {
 													Some(method) => {
+//														println!("Found method");
+//														println!("method.name : {:?}", method.name);
+//														println!("id : {:?}", *id);
 														if method.name == *id {
 															Ok(ExprNode(MethodCall(MethodCallExpr {
 																var: Box::new(ClassId(cls_id_expr)),
@@ -1813,10 +1878,10 @@ impl Visitor for DecafTreeBuilder {
 																args: arg_exprs
 															})))
 														} else {
-															Err(ENoCompatibleMethod)
+															Err(ENoCompatibleMethod(id.clone()))
 														}
 													}
-													None => Err(ENoCompatibleMethod)
+													None => Err(ENoCompatibleMethod(id.clone()))
 												}
 											},
 											_ => {
@@ -1825,9 +1890,9 @@ impl Visitor for DecafTreeBuilder {
 													if prim_ty.array_lvl == 0 {
 														// Lookup method
 														match if self.has_class_in_scope_stack(&cls) {
-															cls.get_compatible_level0_method(&arg_exprs)
+															cls.get_compatible_level0_method(&arg_exprs, id)
 														} else {
-															cls.get_compatible_level1_method(&arg_exprs)
+															cls.get_compatible_level1_method(&arg_exprs, id)
 														} {
 															Some(method) => {
 																if method.name == *id {
@@ -1837,10 +1902,10 @@ impl Visitor for DecafTreeBuilder {
 																		args: arg_exprs
 																	})))
 																} else {
-																	Err(ENoCompatibleMethod)
+																	Err(ENoCompatibleMethod(id.clone()))
 																}
 															},
-															None => Err(ENoCompatibleMethod)
+															None => Err(ENoCompatibleMethod(id.clone()))
 														}
 													} else {
 														Err(EArrayTypeNotSupportMethodCall)
@@ -1863,19 +1928,19 @@ impl Visitor for DecafTreeBuilder {
 								// NOTE: make it recursive if we support nested class
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
-										match cls.get_compatible_level0_super_method(&arg_exprs) {
+										match cls.get_compatible_level0_super_method(&arg_exprs, id) {
 											Some(method) => {
 												if method.name == *id {
 													Ok(ExprNode(SuperCall(SuperCallExpr {
 														cls: cls.clone(),
-														method: method,
+														method,
 														args: arg_exprs,
 													})))
 												} else {
-													Err(ENoCompatibleMethod)
+													Err(ENoCompatibleMethod(id.clone()))
 												}
 											},
-											None => Err(ENoCompatibleMethod)
+											None => Err(ENoCompatibleMethod(id.clone()))
 										}
 									}
 									Some(_) | None => Err(ESuperCallWithoutClass)
@@ -2052,5 +2117,21 @@ impl Visitor for DecafTreeBuilder {
 			}
 			_ => Err(EThisWithoutClass)
 		}
+	}
+}
+
+pub fn parse_decaf<'a>(src: &str) -> Result<Program, String> {
+	use self::BuilderResult::*;
+	let syntactic_program = lnp::parse_decaf(src);
+	let mut builder = DecafTreeBuilder::new();
+	match builder.visit_program(&syntactic_program) {
+		Ok(Normal) => {
+			Ok(Program {
+				classes: builder.class_map.iter()
+					.map(|(_, cls)| cls.clone()).collect::<Vec<Rc<decaf::Class>>>()
+			})
+		}
+		Ok(_) => Err("expect Normal result".to_string()),
+		Err(e) => Err(format!("{:?}", e))
 	}
 }

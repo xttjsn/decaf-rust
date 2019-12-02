@@ -6,12 +6,17 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "decaf"
-proc-macro = true
+name = "decaflib"
 path = "src/lib.rs"
+
+[[bin]]
+name = "decafc"
+path = "src/main.rs"
 
 [dependencies]
 plex = "0.2.5"
 llvm-sys = "80"
 libc = "0.2.66"
 tempfile = "2.1"
+getopts = "0.2"
+matches = "0.1"

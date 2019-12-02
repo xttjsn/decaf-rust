@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use crate::lnp;
 
-use crate::lnp::past::{BinOp, UnOp};
+use lnp::past::{BinOp, UnOp};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
@@ -44,7 +45,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) => false,
+				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) | StrTy => false,
 				IntTy => true,
 			}
 		} else {
@@ -56,7 +57,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_) | IntTy | CharTy | VoidTy | NULLTy | ClassTy(_) => false,
+				UnknownTy(_) | IntTy | CharTy | VoidTy | NULLTy | ClassTy(_) | StrTy => false,
 				BoolTy => true,
 			}
 		} else {
@@ -68,7 +69,7 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) => false,
+				UnknownTy(_)  | VoidTy | NULLTy | ClassTy(_) | StrTy => false,
 				IntTy | CharTy | BoolTy => true,
 			}
 		} else {
@@ -81,7 +82,7 @@ impl Type {
 		if self.array_lvl == 0 {
 			match &self.base {
 				UnknownTy(_)  | VoidTy => false,
-				IntTy | CharTy | BoolTy | ClassTy(_) | NULLTy => true,
+				IntTy | CharTy | BoolTy | ClassTy(_) | NULLTy | StrTy => true,
 			}
 		} else {
 			false
@@ -95,6 +96,7 @@ pub enum TypeBase {
 	BoolTy,
 	IntTy,
 	CharTy,
+	StrTy,
 	VoidTy,
 	NULLTy,
 	ClassTy(Rc<Class>),
@@ -119,7 +121,7 @@ impl Method {
 			array_lvl: 0,
 		});
 		Method {
-			name: name,
+			name,
 			cls: RefCell::new(cls),
 			vis: RefCell::new(Visibility::Pub),
 			stat: RefCell::new(false),
@@ -527,7 +529,7 @@ pub struct ThisExpr {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateObjExpr {
 	pub cls: Rc<Class>,
-	pub ctor: Rc<Ctor>,
+	pub ctor: Option<Rc<Ctor>>,
 	pub args: Vec<Expr>,
 }
 
@@ -783,9 +785,13 @@ impl Class {
 	}
 
 	pub fn get_method_by_signature(&self, return_ty: &TypeBase, array_lvl: u32,
-								   args: &Vec<(String, TypeBase, u32)>, is_static: bool) -> Option<Rc<Method>> {
+								   args: &Vec<(String, TypeBase, u32)>, is_static: bool, name: &str) -> Option<Rc<Method>> {
+		println!("get_method_by_signature: \n return_ty: {:?}\n array_lvl: {}\n args: {:?}\n is_static: {}", return_ty, array_lvl, args, is_static);
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
 				if method.return_ty.borrow().base != *return_ty ||
 					method.return_ty.borrow().array_lvl != array_lvl {
 						continue;
@@ -793,7 +799,7 @@ impl Class {
 
 				for (arga, argb) in method.args.borrow().iter().zip(args.iter()) {
 					if arga.0 != argb.0 || arga.1.base != argb.1 || arga.1.array_lvl != argb.2 {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
@@ -827,10 +833,10 @@ impl Class {
 
 	pub fn get_ctor_by_signature(&self, args: &Vec<(String, TypeBase, u32)>) -> Option<Rc<Ctor>> {
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter() {
 				for (arga, argb) in ctor.args.borrow().iter().zip(args.iter()) {
 					if arga.0 != argb.0 || arga.1.base != argb.1 || arga.1.array_lvl != argb.2 {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(ctor.clone());
@@ -852,10 +858,10 @@ impl Class {
 	pub fn get_compatible_super_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter() {
 				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(ctor.clone());
@@ -880,10 +886,10 @@ impl Class {
 	pub fn get_compatible_level0_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			for ctor in ctors.iter() {
-				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
+			'outer: for ctor in ctors.iter() {
+				'inner: for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(ctor.clone());
@@ -906,10 +912,10 @@ impl Class {
 	pub fn get_compatible_level1_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter() {
 				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(ctor.clone());
@@ -923,14 +929,17 @@ impl Class {
 		}
 	}
 
-	pub fn get_compatible_level0_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+	pub fn get_compatible_level0_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
@@ -950,14 +959,18 @@ impl Class {
 		}
 	}
 
-	pub fn get_compatible_level1_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+	pub fn get_compatible_level1_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
+
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
@@ -971,14 +984,17 @@ impl Class {
 		}
 	}
 
-	pub fn get_compatible_level0_static_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+	pub fn get_compatible_level0_static_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
@@ -998,14 +1014,17 @@ impl Class {
 		}
 	}
 
-	pub fn get_compatible_level1_static_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+	pub fn get_compatible_level1_static_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
@@ -1019,14 +1038,17 @@ impl Class {
 		}
 	}
 
-	pub fn get_compatible_level0_super_method(&self, args: &Vec<Expr>) -> Option<Rc<Method>> {
+	pub fn get_compatible_level0_super_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			for method in methods.iter() {
+			'outer: for method in methods.iter() {
+				if method.name != name {
+					continue;
+				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
 					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
-						continue;
+						continue 'outer;
 					}
 				}
 				return Some(method.clone());
