@@ -18,7 +18,15 @@ use std::str;
 
 use std::ptr;
 use std::ptr::null_mut;
-use crate::lnp::lexer::Token::Not;
+
+use std::rc::Rc;
+
+use std::mem;
+
+use self::CodeValue::*;
+use std::cell::Ref;
+use crate::decaf::Visibility;
+use self::llvm_sys::debuginfo::LLVMTemporaryMDNode;
 
 pub const ADDRESS_SPACE_GENERIC: ::libc::c_uint = 0;
 pub const ADDRESS_SPACE_GLOBAL: ::libc::c_uint = 1;
@@ -32,18 +40,27 @@ pub const IO_GET_CHAR_NAME: *const ::libc::c_char = b"IO_getChar_inner\0".as_ptr
 pub const IO_GET_INT_NAME: *const ::libc::c_char = b"IO_getInt_inner\0".as_ptr() as *const _;
 pub const IO_GET_LINE_NAME: *const ::libc::c_char = b"IO_getLine_inner\0".as_ptr() as *const _;
 pub const IO_PEEK_NAME: *const ::libc::c_char = b"IO_peek_inner\0".as_ptr() as *const _;
+pub const DECAF_MD_PUB_CTOR_KIND: ::libc::c_uint = 1;
+pub const DECAF_MD_PROT_CTOR_KIND: ::libc::c_uint = 2;
+pub const DECAF_MD_PRIV_CTOR_KIND: ::libc::c_uint = 3;
+pub const DECAF_MD_PUB_METHOD_KIND: ::libc::c_uint = 4;
+pub const DECAF_MD_PROT_METHOD_KIND: ::libc::c_uint = 5;
+pub const DECAF_MD_PRIV_METHOD_KIND: ::libc::c_uint = 6;
+pub const DECAF_MD_PUB_STATIC_KIND: ::libc::c_uint = 7;
+pub const DECAF_MD_PROT_STATIC_KIND: ::libc::c_uint = 8;
+pub const DECAF_MD_PRIV_STATIC_KIND: ::libc::c_uint = 9;
 const LLVM_FALSE: LLVMBool = 0;
 const LLVM_TRUE: LLVMBool = 1;
 
 macro_rules! char_type {
       () => {
-          LLVMInt8Type()
+          unsafe { LLVMInt8Type() }
       }
     }
 
 macro_rules! int_type {
       () => {
-          LLVMInt64Type()
+          unsafe { LLVMInt64Type() }
       }
     }
 
@@ -55,13 +72,13 @@ macro_rules! i32_type {
 
 macro_rules! bool_type {
       () => {
-          LLVMInt1Type()
+          unsafe {  LLVMInt1Type() }
       }
     }
 
 macro_rules! void_type {
       () => {
-          LLVMVoidType()
+          unsafe { LLVMVoidType() }
       }
     }
 
@@ -69,11 +86,20 @@ macro_rules! null {
       () => { ptr::null::<LLVMTypeRef>() as *mut _ }
 }
 
+macro_rules! i64_ptr_type {
+      () => ({
+          unsafe { LLVMPointerType(LLVMInt64Type(), ADDRESS_SPACE_GENERIC) }
+      })
+}
+
 macro_rules! char_ptr_type {
-      ($cstrct:expr) => {
+      () => ({
+          unsafe { LLVMPointerType(LLVMInt8Type(), ADDRESS_SPACE_GENERIC) }
+      });
+      ($cstrct:expr) => ({
           LLVMPointerType(
                     LLVMInt8TypeInContext($cstrct.ctx), ADDRESS_SPACE_GENERIC)
-      }
+      })
 }
 
 macro_rules! name {
@@ -92,21 +118,16 @@ macro_rules! params {
     })
 }
 
-macro_rules! str_to_cstr_mut_ptr {
-	($s: expr) => {
-        CString::new($s).unwrap().as_ptr() as *mut _
-	}
-}
-
-macro_rules! str_to_cstr {
-	($s: expr) => {
-		CString::new($s).unwrap().to_bytes_with_nul().as_ptr() as *const _
-	}
+macro_rules! vtable_name {
+    ($cls_name:expr) => {
+        format!("{}_vtable", $cls_name)
+    }
 }
 
 pub enum CodeValue {
     V(LLVMValueRef),
     T(LLVMTypeRef),
+    OK,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +135,10 @@ pub enum CompileError {
     NotImplemented,
     DuplicatedType,
     DuplicatedFunction,
+    DuplicatedGlobal,
+    FunctionNotFound(String),
+    IndexNotFound(String),
+    UnknownType(String),
 }
 
 pub type GenCodeResult = Result<CodeValue, CompileError>;
@@ -226,9 +251,11 @@ pub struct CodeGenerator {
     module: LLVMModuleRef,
     types_map: BTreeMap<String, LLVMTypeRef>,
     functions_map: BTreeMap<String, LLVMValueRef>,
+    global_map: BTreeMap<String, LLVMValueRef>,
 	target_triple: Option<String>,
 	llvm_inited: bool,
 	strings: Vec<CString>,
+    metadatas: Vec<Vec<LLVMMetadataRef>>,
 }
 
 pub fn new_generator(module_name: &str, target_triple: Option<String>) -> CodeGenerator {
@@ -245,9 +272,11 @@ impl CodeGenerator {
 			module: create_module(module_name, target_triple.clone()),
 			types_map: BTreeMap::new(),
 			functions_map: BTreeMap::new(),
+            global_map: BTreeMap::new(),
 			target_triple,
 			llvm_inited: false,
 			strings: Vec::new(),
+            metadatas: Vec::new(),
 		}
 	}
 
@@ -292,13 +321,30 @@ impl CodeGenerator {
         }
     }
 
-	fn new_string_class(&self, s: &str) -> LLVMValueRef {
+    fn get_global_by_name(&self, name: &str) -> Option<LLVMValueRef> {
+        match self.global_map.get(name.into()) {
+            None => None,
+            Some(g) => Some(g.clone())
+        }
+    }
+
+    fn add_global(&mut self, name: &str, g: LLVMValueRef) -> Result<(), CompileError> {
+        match self.get_global_by_name(name) {
+            None => {
+                self.global_map.insert(name.into(), g);
+                Ok(())
+            }
+            Some(_) => Err(DuplicatedGlobal)
+        }
+    }
+
+	fn new_string_class(&mut self, s: &str) -> LLVMValueRef {
 		// Create a String object and return the value of it
 		unsafe {
             // Allocate memory
             let string_val = LLVMBuildMalloc(self.builder, self.get_llvm_type_by_name("String", false).unwrap(), name!(b"malloc_string\0"));
             // Copy string
-            let s_val = LLVMConstStringInContext(self.ctx, str_to_cstr!(s), s.len() as u32, 1);
+            let s_val = LLVMConstStringInContext(self.ctx, self.new_string_ptr(s), s.len() as u32, 1);
             // TODO: allocate ?
             let str_addr = LLVMBuildGEP2(self.builder, char_ptr_type!(self), string_val, indices!(0, 0), 2, name!(b"gep_str_from_String\0"));
             LLVMBuildStore(self.builder, s_val, str_addr);
@@ -316,6 +362,21 @@ impl CodeGenerator {
 		self.strings.push(cstring);
 		ptr
 	}
+
+    fn new_md_from_vals(&mut self, vals: &mut Vec<LLVMValueRef>) -> Option<LLVMMetadataRef> {
+        if vals.len() > 0 {
+            unsafe {
+                Some(LLVMMDNodeInContext(self.ctx,
+                                    vals.as_mut_slice().as_mut_ptr() as *mut _,
+                                    vals.len() as u32));
+                Some(LLVMTemporaryMDNode(self.ctx,
+                                         vals.as_mut_slice().as_mut_ptr() as *mut _,
+                                         vals.len()))
+            }
+        } else {
+            None
+        }
+    }
 
 	pub fn optimize(&mut self, llvm_opt: i64) {
 		unsafe {
@@ -567,7 +628,7 @@ impl CodeGenerator {
 		self.gen_builtin();
 		self.add_main_fn();
 
-        for cls in program.classes {
+        for cls in &program.classes {
             match cls.gencode(self) {
                 Ok(_) => {}
                 Err(e) => {
@@ -581,27 +642,321 @@ impl CodeGenerator {
 
 }
 
+fn ty2llvmty(ty: &decaf::Type) -> LLVMTypeRef {
+    use decaf::TypeBase::*;
+    let base_llvm_ty = match &ty.base {
+        UnknownTy(name) => {
+            panic!("unknown type : {}", name);
+        }
+        BoolTy => bool_type!(),
+        IntTy => int_type!(),
+        CharTy => char_type!(),
+        StrTy => panic!("StrTy shouldn't be looked up"),
+        VoidTy => void_type!(),
+        NULLTy => char_ptr_type!(),
+        ClassTy(_) => char_ptr_type!(),  // Hack here, we'll cast it to correct type during field accessing
+    };
+    if ty.array_lvl == 0 {
+        base_llvm_ty
+    } else {
+        let mut curr_ty = base_llvm_ty;
+        let mut lvl = ty.array_lvl;
+        while lvl > 0 {
+            unsafe {
+                curr_ty = LLVMPointerType(curr_ty, ADDRESS_SPACE_GENERIC);
+            }
+            lvl -= 1;
+        }
+        curr_ty
+    }
+}
+
 trait CodeGen {
     fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult;
 }
 
 impl CodeGen for decaf::Class {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-        // Define types for the current class
-        // This requires knowing all the fields
-        // Also add a pointer to vtable
-        // TODO: use Metadata
-//        let vtable_ptr_ty = LLVMPo
-//        let cls_llvm_ty = LLVMStructType(params!())
 
-        // For each method, invoke gencode on it
-        Err(NotImplemented)
+        // Skip built-in classes
+        if self.name == "Object" || self.name == "String" || self.name == "IO" {
+            return Ok(OK);
+        }
+
+        // Define vtable type
+        let vtable_ty;
+        let vtable_global;
+        unsafe {
+            vtable_ty = LLVMArrayType(i64_ptr_type!(), self.vtable.borrow().len() as u32);
+            vtable_global = LLVMAddGlobal(generator.module, vtable_ty,
+                                          generator.new_string_ptr(&vtable_name!(self.name)));
+        }
+
+        generator.add_global(&vtable_name!(self.name), vtable_global);
+
+        // Define LLVM struct type for class
+        let mut field_llvm_types: Vec<LLVMTypeRef> = vec![vtable_ty];
+        field_llvm_types.extend(self.pub_fields.borrow().iter().map(|f| ty2llvmty(&f.ty.borrow())));
+        field_llvm_types.extend(self.prot_fields.borrow().iter().map(|f| ty2llvmty(&f.ty.borrow())));
+        field_llvm_types.extend(self.priv_fields.borrow().iter().map(|f| ty2llvmty(&f.ty.borrow())));
+        let cls_llvm_type;
+        unsafe {
+            cls_llvm_type = LLVMStructType(field_llvm_types.as_mut_ptr() as *mut _, field_llvm_types.len() as u32, 0);
+        }
+        generator.add_llvm_type(&self.name, cls_llvm_type.clone())?;
+
+        // Define types for all methods/ctors/static methods
+
+        unsafe {
+            for (ix, pub_ctor) in self.pub_ctors.borrow().iter().enumerate() {
+                let ctor_ty;
+                let ctor_val;
+                unsafe {
+                    ctor_ty = LLVMFunctionType(cls_llvm_type.clone(),
+                                                   pub_ctor.args.borrow().iter()
+                                                       .map(|(_, ty)| ty2llvmty(ty))
+                                                       .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                                   pub_ctor.args.borrow().len() as u32,
+                                                   0);
+                    ctor_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&pub_ctor.llvm_name()),
+                                               ctor_ty);
+					generator.add_function(&pub_ctor.llvm_name(), ctor_val);
+                }
+            }
+
+            for (ix, prot_ctor) in self.prot_ctors.borrow().iter().enumerate() {
+                let ctor_ty;
+                let ctor_val;
+                unsafe {
+                    ctor_ty = LLVMFunctionType(cls_llvm_type.clone(),
+                                               prot_ctor.args.borrow().iter()
+                                                   .map(|(_, ty)| ty2llvmty(ty))
+                                                   .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                               prot_ctor.args.borrow().len() as u32,
+                                               0);
+                    ctor_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&prot_ctor.llvm_name()),
+                                               ctor_ty);
+					generator.add_function(&prot_ctor.llvm_name(), ctor_val);
+                }
+            }
+
+			for (ix, priv_ctor) in self.priv_ctors.borrow().iter().enumerate() {
+                let ctor_ty;
+                let ctor_val;
+                unsafe {
+                    ctor_ty = LLVMFunctionType(cls_llvm_type.clone(),
+                                               priv_ctor.args.borrow().iter()
+                                               .map(|(_, ty)| ty2llvmty(ty))
+                                               .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                               priv_ctor.args.borrow().len() as u32,
+                                               0);
+                    ctor_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&priv_ctor.llvm_name()),
+                                               ctor_ty);
+					generator.add_function(&priv_ctor.llvm_name(), ctor_val);
+                }
+            }
+
+            for (ix, pub_method) in self.pub_methods.borrow().iter().enumerate() {
+                let method_ty;
+                let method_val;
+                unsafe {
+                    let mut args = vec![cls_llvm_type.clone()]; // The "this" reference
+                    args.extend(pub_method.args.borrow().iter()
+                        .map(|(_, ty)| ty2llvmty(ty))
+                        .collect::<Vec<LLVMTypeRef>>());
+                    method_ty = LLVMFunctionType(ty2llvmty(&pub_method.return_ty.borrow()),
+                                               args.as_mut_ptr() as *mut _,
+                                               pub_method.args.borrow().len() as u32,
+                                               0);
+                    method_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&pub_method.llvm_name()),
+												 method_ty);
+					generator.add_function(&pub_method.llvm_name(), method_val);
+                }
+            }
+
+			for (ix, prot_method) in self.prot_methods.borrow().iter().enumerate() {
+                let method_ty;
+                let method_val;
+                unsafe {
+                    let mut args = vec![cls_llvm_type.clone()]; // The "this" reference
+                    args.extend(prot_method.args.borrow().iter()
+                        .map(|(_, ty)| ty2llvmty(ty))
+                        .collect::<Vec<LLVMTypeRef>>());
+                    method_ty = LLVMFunctionType(ty2llvmty(&prot_method.return_ty.borrow()),
+                                               args.as_mut_ptr() as *mut _,
+                                               prot_method.args.borrow().len() as u32,
+                                               0);
+                    method_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&prot_method.llvm_name()),
+												 method_ty);
+					generator.add_function(&prot_method.llvm_name(), method_val);
+                }
+            }
+
+			for (ix, priv_method) in self.priv_methods.borrow().iter().enumerate() {
+                let method_ty;
+                let method_val;
+                unsafe {
+                    let mut args = vec![cls_llvm_type.clone()]; // The "this" reference
+                    args.extend(priv_method.args.borrow().iter()
+                        .map(|(_, ty)| ty2llvmty(ty))
+                        .collect::<Vec<LLVMTypeRef>>());
+                    method_ty = LLVMFunctionType(ty2llvmty(&priv_method.return_ty.borrow()),
+                                               args.as_mut_ptr() as *mut _,
+                                               priv_method.args.borrow().len() as u32,
+                                               0);
+                    method_val = LLVMAddFunction(generator.module,
+                                               generator.new_string_ptr(&priv_method.llvm_name()),
+												 method_ty);
+					generator.add_function(&priv_method.llvm_name(), method_val);
+                }
+            }
+
+			for (ix, pub_static) in self.pub_static_methods.borrow().iter().enumerate() {
+                let static_ty;
+                let static_val;
+                unsafe {
+                    static_ty = LLVMFunctionType(ty2llvmty(&pub_static.return_ty.borrow()),
+                                                 pub_static.args.borrow().iter()
+                                                     .map(|(_, ty)| ty2llvmty(ty))
+                                                     .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                                 pub_static.args.borrow().len() as u32,
+                                                 0);
+                    static_val = LLVMAddFunction(generator.module,
+                                                 generator.new_string_ptr(&pub_static.llvm_name()),
+                                                 static_ty);
+					generator.add_function(&pub_static.llvm_name(), static_val);
+                }
+            }
+
+			for (ix, prot_static) in self.prot_static_methods.borrow().iter().enumerate() {
+                let static_ty;
+                let static_val;
+                unsafe {
+                    static_ty = LLVMFunctionType(ty2llvmty(&prot_static.return_ty.borrow()),
+                                                 prot_static.args.borrow().iter()
+                                                     .map(|(_, ty)| ty2llvmty(ty))
+                                                     .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                                 prot_static.args.borrow().len() as u32,
+                                                 0);
+                    static_val = LLVMAddFunction(generator.module,
+                                                 generator.new_string_ptr(&prot_static.llvm_name()),
+                                                 static_ty);
+					generator.add_function(&prot_static.llvm_name(), static_val);
+                }
+            }
+
+			for (ix, priv_static) in self.priv_static_methods.borrow().iter().enumerate() {
+                let static_ty;
+                let static_val;
+                unsafe {
+                    static_ty = LLVMFunctionType(ty2llvmty(&priv_static.return_ty.borrow()),
+                                                 priv_static.args.borrow().iter()
+                                                     .map(|(_, ty)| ty2llvmty(ty))
+                                                     .collect::<Vec<LLVMTypeRef>>().as_mut_ptr() as *mut _,
+                                                 priv_static.args.borrow().len() as u32,
+                                                 0);
+                    static_val = LLVMAddFunction(generator.module,
+                                                 generator.new_string_ptr(&priv_static.llvm_name()),
+                                                 static_ty);
+					generator.add_function(&priv_static.llvm_name(), static_val);
+                }
+            }
+        }
+
+        // Visit each ctor/method/static method
+        for (ix, ctor) in self.pub_ctors.borrow().iter().enumerate() {
+            ctor.gencode(generator)?;
+        }
+
+        for (ix, ctor) in self.prot_ctors.borrow().iter().enumerate() {
+            ctor.gencode(generator)?;
+        }
+
+        for (ix, ctor) in self.priv_ctors.borrow().iter().enumerate() {
+            ctor.gencode(generator)?;
+        }
+
+		for (ix, method) in self.pub_methods.borrow().iter().enumerate() {
+            method.gencode(generator)?;
+        }
+
+        for (ix, method) in self.prot_methods.borrow().iter().enumerate() {
+            method.gencode(generator)?;
+        }
+
+        for (ix, method) in self.priv_methods.borrow().iter().enumerate() {
+            method.gencode(generator)?;
+        }
+
+		for (ix, static_method) in self.pub_static_methods.borrow().iter().enumerate() {
+            static_method.gencode(generator)?;
+        }
+
+        for (ix, static_method) in self.prot_static_methods.borrow().iter().enumerate() {
+            static_method.gencode(generator)?;
+        }
+
+        for (ix, static_method) in self.priv_static_methods.borrow().iter().enumerate() {
+            static_method.gencode(generator)?;
+        }
+
+        Ok(OK)
+	}
+}
+
+impl CodeGen for decaf::Ctor {
+    fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
+        // Get function llvm value
+		let name = self.llvm_name();
+		match generator.get_function_by_name(&name) {
+			Some(ctor_llvm_val) => {
+				// Create basic block
+				unsafe {
+					let ctor_bb = LLVMAppendBasicBlockInContext(
+						generator.ctx,
+						ctor_llvm_val,
+						generator.new_string_ptr(
+							&format!("{}_mainbb",
+									 self.llvm_name()))
+					);
+					LLVMPositionBuilderAtEnd(generator.builder, ctor_bb);
+				}
+
+				// Visit body
+				decaf::Stmt::Block(self.body.borrow().clone().unwrap()).gencode(generator)
+			}
+			None => Err(FunctionNotFound(name))
+		}
 	}
 }
 
 impl CodeGen for decaf::Method {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-		Err(NotImplemented)
+		let name = self.llvm_name();
+		match generator.get_function_by_name(&name) {
+			Some(method_llvm_val) => {
+				// Create basic block
+				unsafe {
+					let method_bb = LLVMAppendBasicBlockInContext(
+						generator.ctx,
+						method_llvm_val,
+						generator.new_string_ptr(
+							&format!("{}_mainbb",
+									 self.llvm_name()))
+					);
+					LLVMPositionBuilderAtEnd(generator.builder, method_bb);
+				}
+
+				// Visit body
+				decaf::Stmt::Block(self.body.borrow().clone().unwrap()).gencode(generator)
+			}
+			None => Err(FunctionNotFound(name))
+		}
 	}
 }
 
@@ -614,5 +969,46 @@ impl CodeGen for decaf::Stmt {
 impl CodeGen for decaf::Expr {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
 		Err(NotImplemented)
+	}
+}
+
+trait LLVMName {
+	fn llvm_name(&self) -> String;
+}
+
+impl LLVMName for decaf::Ctor {
+	fn llvm_name(&self) -> String {
+		format!("{}_{}_ctor_{}",
+				self.cls.name,
+				self.vis.borrow(),
+				self.args.borrow().iter()
+				.map(|(_, ty)|{format!("{}", ty)})
+				.collect::<Vec<String>>()
+				.join("_"))
+	}
+}
+
+impl LLVMName for decaf::Method {
+	fn llvm_name(&self) -> String {
+		match *self.stat.borrow() {
+			true => {
+				format!("{}_{}_static_method_{}",
+						self.cls.borrow().name,
+						self.vis.borrow(),
+						self.args.borrow().iter()
+						.map(|(_, ty)|{format!("{}", ty)})
+						.collect::<Vec<String>>()
+						.join("_"))
+			}
+			false => {
+				format!("{}_{}_method_{}",
+						self.cls.borrow().name,
+						self.vis.borrow(),
+						self.args.borrow().iter()
+						.map(|(_, ty)|{format!("{}", ty)})
+						.collect::<Vec<String>>()
+						.join("_"))
+			}
+		}
 	}
 }

@@ -3,17 +3,17 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::decaf;
-use crate::decaf::{Returnable, Value};
+use crate::decaf::{Returnable, Value, VTable};
 use crate::decaf::Scope::WhileScope;
 use crate::lnp;
 use crate::lnp::lexer::Token::IntLit;
 
 macro_rules! debug {
-() => (println!());
-($($arg:tt)*) => ({
-println!("DEBUG");
-println!($($arg)*);
-println!("END DEBUG")})
+	() => (println!());
+	($($arg:tt)*) => ({
+		println!("DEBUG");
+		println!($($arg)*);
+		println!("END DEBUG")})
 }
 
 pub trait Visitor {
@@ -551,12 +551,12 @@ impl ASTBuilder for DecafTreeBuilder {
 
 		// No default methods for String
 		*strcls.sup.borrow_mut() = Some(objcls.clone());
-		{
-			let str_inner_fld = Field::new("str".to_string());
-			let str_len_fld = Field::new("len".to_string());
-			strcls.priv_fields.borrow_mut().push(Rc::new(str_inner_fld));
-			// TODO: add LLVM string valueo
-		}
+//		{
+//			let str_inner_fld = Field::new("str".to_string());
+//			let str_len_fld = Field::new("len".to_string());
+//			strcls.priv_fields.borrow_mut().push(Rc::new(str_inner_fld));
+//			// TODO: add LLVM string valueo
+//		}
 
 		// putChar, putString, putInt, getChar, getInt, getLine, peek()
 		*iocls.sup.borrow_mut() = Some(iocls.clone());
@@ -797,7 +797,7 @@ impl Visitor for DecafTreeBuilder {
 													   move |cls_ty| {
 														   tmp.clone().set_base_type(Rc::new(Type{
 															   base: ClassTy(cls_ty),
-															   array_lvl: array_lvl,
+															   array_lvl,
 														   }));
 														   None
 													   }
@@ -882,13 +882,14 @@ impl Visitor for DecafTreeBuilder {
 														   move |cls_ty| {
 															   *tmp.clone().return_ty.borrow_mut() = Rc::new(Type {
 																   base: ClassTy(cls_ty),
-																   array_lvl: array_lvl,
+																   array_lvl,
 															   });
 															   None
 														   }
 													   ))) {
 					*method_node.return_ty.borrow_mut() = Rc::new(return_ty);
 				}
+
 
 				// Get arg types
 				for (arg_name, arg_ty, arg_array_lvl) in args.into_iter() {
@@ -900,7 +901,7 @@ impl Visitor for DecafTreeBuilder {
 															move |cls_ty| {
 																tmp.set_arg_type(tmp_name.clone(), Rc::new(Type {
 																	base: ClassTy(cls_ty),
-																	array_lvl: array_lvl,
+																	array_lvl,
 																}));
 																None
 															}
@@ -929,7 +930,8 @@ impl Visitor for DecafTreeBuilder {
 						match modifier {
 							ModPublic(_) => {
 								*method_node.vis.borrow_mut() = Pub;
-								curr_cls.pub_methods.borrow_mut().push(method_node);
+								curr_cls.pub_methods.borrow_mut().push(method_node.clone());
+								curr_cls.vtable.borrow_mut().add_vmethod(&method_node);
 							}
 							ModPrivate(_) => {
 								*method_node.vis.borrow_mut() = Priv;
@@ -937,7 +939,8 @@ impl Visitor for DecafTreeBuilder {
 							}
 							ModProtected(_) => {
 								*method_node.vis.borrow_mut() = Prot;
-								curr_cls.prot_methods.borrow_mut().push(method_node);
+								curr_cls.prot_methods.borrow_mut().push(method_node.clone());
+								curr_cls.vtable.borrow_mut().add_vmethod(&method_node);
 							}
 							ModStatic(_) => {
 								*method_node.vis.borrow_mut() = Pub;
@@ -949,7 +952,8 @@ impl Visitor for DecafTreeBuilder {
 					(0, None) => {
 						// Default to public methods
 						*method_node.vis.borrow_mut() = Pub;
-						curr_cls.pub_methods.borrow_mut().push(method_node);
+						curr_cls.pub_methods.borrow_mut().push(method_node.clone());
+						curr_cls.vtable.borrow_mut().add_vmethod(&method_node);
 					},
 					(2, _) => {
 						// public/private/protected + static

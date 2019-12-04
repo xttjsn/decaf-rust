@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::fmt;
 use crate::lnp;
 
 use lnp::past::{BinOp, UnOp};
@@ -11,10 +12,61 @@ pub enum Visibility {
 	Prot,
 }
 
+impl fmt::Display for Visibility {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		use Visibility::*;
+		match self {
+			Pub => {
+				write!(f, "pub");
+			}
+			Prot => {
+				write!(f, "prot");
+			}
+			Priv => {
+				write!(f, "priv");
+			}
+		}
+		Ok(())
+	}
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Type {
 	pub base: TypeBase,
 	pub array_lvl: u32,
+}
+
+impl fmt::Display for Type {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		use TypeBase::*;
+		match &self.base {
+			UnknownTy(name) => {
+				write!(f, "{}_{}", name, self.array_lvl);
+			}
+			BoolTy => {
+				write!(f, "bool_{}", self.array_lvl);
+			}
+			IntTy => {
+				write!(f, "int_{}", self.array_lvl);
+			}
+			CharTy => {
+				write!(f, "char_{}", self.array_lvl);
+			}
+			StrTy => {
+				write!(f, "str_{}", self.array_lvl);
+			}
+			VoidTy => {
+				write!(f, "void_{}", self.array_lvl);
+			}
+			NULLTy => {
+				write!(f, "null_{}", self.array_lvl);
+			}
+			ClassTy(cls) => {
+				write!(f, "{}_{}", cls.name, self.array_lvl);
+			}
+		}
+		Ok(())
+	}
 }
 
 impl Type {
@@ -187,7 +239,7 @@ pub struct Ctor {
 impl Ctor {
 	pub fn new(cls: Rc<Class>) -> Self {
 		Ctor {
-			cls: cls,
+			cls,
 			vis: RefCell::new(Visibility::Pub),
 			args: RefCell::new(vec![]),
 			body: RefCell::new(None),
@@ -667,6 +719,7 @@ pub struct Class {
 	pub pub_static_methods: RefCell<Vec<Rc<Method>>>,
 	pub prot_static_methods: RefCell<Vec<Rc<Method>>>,
 	pub priv_static_methods: RefCell<Vec<Rc<Method>>>,
+	pub vtable: RefCell<Vec<Rc<Method>>>,
 }
 
 fn prepend<T>(v: &[T], s: &[T]) -> Vec<T>
@@ -676,6 +729,25 @@ where
 	let mut tmp: Vec<_> = s.to_owned();
 	tmp.extend(v.to_owned());
 	tmp
+}
+
+pub trait VTable {
+	fn add_vmethod(&mut self, method: &Rc<Method>);
+}
+
+impl VTable for Vec<Rc<Method>> {
+	fn add_vmethod(&mut self, method: &Rc<Method>) {
+		// TODO: check that all methods vtable have different signature
+		match self.iter().position(|m| m.has_same_signature(method)) {
+			Some(ix) => {
+				self[ix] = method.clone();
+			}
+			None => {
+				self.push(method.clone());
+			}
+		}
+
+	}
 }
 
 impl Class {
@@ -695,6 +767,7 @@ impl Class {
 			pub_static_methods: RefCell::new(vec![]),
 			prot_static_methods: RefCell::new(vec![]),
 			priv_static_methods: RefCell::new(vec![]),
+			vtable: RefCell::new(vec![]),
 		}
 	}
 
@@ -760,6 +833,13 @@ impl Class {
 		}
 		let prot_methods = prepend(&self.prot_methods.borrow()[..], &supr.prot_methods.borrow()[..]);
 		*self.prot_methods.borrow_mut() = prot_methods;
+
+		// Inherit vtable
+		let mut supr_vtable = supr.vtable.borrow().clone();
+		for method in self.vtable.borrow().iter() {
+			supr_vtable.add_vmethod(method);
+		}
+		*self.vtable.borrow_mut() = supr_vtable;
 	}
 
 	pub fn get_field_by_name(&self, name: &String) -> Option<Rc<Field>> {
