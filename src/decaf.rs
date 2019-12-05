@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::fmt;
 use crate::lnp;
 
+use llvm_sys::prelude::*;
 use lnp::past::{BinOp, UnOp};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -302,7 +303,7 @@ pub trait Returnable {
 pub struct Variable {
 	pub name: String,
 	pub ty: Type,
-	// pub addr: LLVMValue
+	pub addr: Option<LLVMValueRef>,
 }
 
 impl Value for Variable {
@@ -668,6 +669,7 @@ impl Scope {
 				let var = Rc::new(Variable {
 					name,
 					ty,
+					None,
 				});
 				blk.vartbl.borrow_mut().push(var);
 			}

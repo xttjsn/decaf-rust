@@ -138,7 +138,8 @@ pub enum SemanticError {
 	EThisNotFound,
 	EMethodCallWithoutClass,
 	EUnknownIdentifier,
-	EMissingReturn
+	EMissingReturn,
+	EUninitializedArray,
 }
 
 trait Normalize {
@@ -916,8 +917,6 @@ impl Visitor for DecafTreeBuilder {
 					}
 				}
 
-				// TODO: Set block
-
 				// Check name conflict
 				if curr_cls.pub_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
 					curr_cls.prot_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
@@ -1374,12 +1373,17 @@ impl Visitor for DecafTreeBuilder {
 												}
 											}
 											None => {
-												self.variable_add(name.clone(), real_ty.clone());
-												res.push(Declare(decaf::DeclareStmt {
-													name: name.clone(),
-													ty: real_ty,
-													init_expr: None,
-												}));
+												if array_cnt > 0 {
+													return Err(EUninitializedArray);
+												} else {
+													self.variable_add(name.clone(), real_ty.clone());
+													res.push(Declare(decaf::DeclareStmt {
+														name: name.clone(),
+														ty: real_ty,
+														init_expr: None,
+													}));
+												}
+
 											}
 										};
 									}
