@@ -303,7 +303,8 @@ pub trait Returnable {
 pub struct Variable {
 	pub name: String,
 	pub ty: Type,
-	pub addr: Option<LLVMValueRef>,
+	pub addr: RefCell<Option<LLVMValueRef>>,
+	pub refcount: RefCell<u32>,  // Simply a count of how many times the variable is loaded
 }
 
 impl Value for Variable {
@@ -669,7 +670,8 @@ impl Scope {
 				let var = Rc::new(Variable {
 					name,
 					ty,
-					None,
+					addr: RefCell:new(None),
+					refcount: RefCell::new(0),
 				});
 				blk.vartbl.borrow_mut().push(var);
 			}
@@ -687,7 +689,7 @@ pub struct Field {
 impl Field {
 	pub fn new(name: String) -> Field {
 		Self {
-			name: name,
+			name,
 			ty: RefCell::new(Rc::new(Type {
 				base: TypeBase::UnknownTy("Unknown".to_string()),
 				array_lvl: 0,

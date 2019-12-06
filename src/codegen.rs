@@ -127,9 +127,38 @@ macro_rules! vtable_name {
     }
 }
 
+pub enum DecafValue {
+    Addr(Rc<decaf::Variable>),
+    Val(decaf::Type, LLVMValueRef),
+}
+
+impl DecafValue {
+    pub fn get_type(&self) -> decaf::Type {
+        use DecafValue::*;
+        match self {
+            Addr(val) => {
+                val.ty.clone()
+            }
+            Val(ty, _) => ty.clone()
+        }
+    }
+    pub fn get_value(&self, generator: &mut CodeGenerator) -> LLVMValueRef {
+        use DecafValue::*;
+        match self {
+            Addr(val) => {
+                unsafe {
+                    LLVMBuildLoad(generator.builder,
+                                  val.addr.borrow().clone().unwrap(),
+                                  generator.new_string_ptr(&format!("{}_ref_{}", val.name, val.next_refcount())))
+                }
+            }
+            Val(_, val) => val
+        }
+    }
+}
+
 pub enum CodeValue {
-    NamedValue(String, decaf::Type, LLVMValueRef),
-    UnNamedValue(decaf::Type, LLVMValueRef),
+    Value(DecafValue),
     Type(decaf::Type, LLVMTypeRef),
     OK,
 }
@@ -147,6 +176,11 @@ pub enum CompileError {
     EUninitializedArray(String),
     EBlockNotInFunction(String),
     ELoopLacksCondBB(String),
+    ENonAddressableValueOnLHS(String),
+    ENonArithOp(String),
+    ENonLogicalOp(String),
+    EUnaryArithNotFound(String),
+    ENonCmpOp(String),
     EInvalidLHSType(decaf::Type),
 }
 
@@ -1058,66 +1092,74 @@ impl CodeGen for decaf::Stmt {
         use decaf::TypeBase::*;
 		match self {
             Declare(stmt) => {
+                let lhs_addr = match &stmt.ty.base {
+                    IntTy | BoolTy | CharTy  => {
+                        // Allocate the entire thing
+                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
+                            // Allocate lhs
+                            unsafe {
+                                LLVMBuildAlloca(generator.builder, llvm_ty,
+                                                generator.new_string_ptr(&stmt.name))
+                            }
+                        } else {
+                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
+                        }
+                    }
+                    ClassTy(cls) => {
+                        // Allocate ptr
+                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
+                            unsafe {
+                                LLVMBuildAlloca(generator.builder, llvm_ty,
+                                                generator.new_string_ptr(&stmt.name))
+                            }
+                        } else {
+                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
+                        }
+                    }
+                    VoidTy | NULLTy | UnknownTy(_) | StrTy => {
+                        return Err(EInvalidLHSType(stmt.ty.clone()));
+                    }
+                };
+
+                self.set_variable_addr(&stmt.name, &stmt.ty, lhs_addr);
+
                 match &stmt.init_expr {
                     Some(expr) => {
                         match expr.gencode(generator)? {
-                            NamedValue(_, vty, val) | UnNamedValue(vty, val) => {
-                                if stmt.ty.is_compatible_with(&vty) {
-                                    let lhs_addr = match stmt.ty.array_lvl {
-                                        0 => {
-                                            match &stmt.ty.base {
-                                                IntTy | BoolTy | CharTy  => {
-                                                    // Allocate the entire thing
-                                                    if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
-                                                        // Allocate lhs
-                                                        unsafe {
-                                                            LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                            generator.new_string_ptr(&stmt.name))
-                                                        }
-                                                    } else {
-                                                        return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                                    }
+                            Value(val) => {
+                                if stmt.ty.is_compatible_with(&val.get_type()) {
+                                    let lhs_addr = match &stmt.ty.base {
+                                        IntTy | BoolTy | CharTy  => {
+                                            // Allocate the entire thing
+                                            if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
+                                                // Allocate lhs
+                                                unsafe {
+                                                    LLVMBuildAlloca(generator.builder, llvm_ty,
+                                                                    generator.new_string_ptr(&stmt.name))
                                                 }
-                                                ClassTy(cls) => {
-                                                    // Allocate ptr
-                                                    if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
-                                                        unsafe {
-                                                            LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                            generator.new_string_ptr(&stmt.name))
-                                                        }
-                                                    } else {
-                                                        return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                                    }
-                                                }
-                                                VoidTy | NULLTy | UnknownTy(_) | StrTy => {
-                                                    return Err(EInvalidLHSType(stmt.ty.clone()));
-                                                }
+                                            } else {
+                                                return Err(EUnknownType(format!("{:?}", stmt.ty)));
                                             }
                                         }
-                                        _ => {
-                                            // Array type
-                                            match &stmt.ty.base {
-                                                IntTy | BoolTy | CharTy | ClassTy(_) => {
-                                                    // Allocate ptr
-                                                    if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
-                                                        unsafe {
-                                                            LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                            generator.new_string_ptr(&stmt.name))
-                                                        }
-                                                    } else {
-                                                        return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                                    }
+                                        ClassTy(cls) => {
+                                            // Allocate ptr
+                                            if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
+                                                unsafe {
+                                                    LLVMBuildAlloca(generator.builder, llvm_ty,
+                                                                    generator.new_string_ptr(&stmt.name))
                                                 }
-                                                VoidTy | NULLTy | UnknownTy(_) | StrTy => {
-                                                    return Err(EInvalidLHSType(stmt.ty.clone()));
-                                                }
+                                            } else {
+                                                return Err(EUnknownType(format!("{:?}", stmt.ty)));
                                             }
+                                        }
+                                        VoidTy | NULLTy | UnknownTy(_) | StrTy => {
+                                            return Err(EInvalidLHSType(stmt.ty.clone()));
                                         }
                                     };
                                     unsafe {
-                                        LLVMBuildStore(generator.builder, val, lhs_addr);
+                                        LLVMBuildStore(generator.builder, val.get_value(generator), lhs_addr);
                                     }
-                                    self.set_variable_addr(&stmt.name, &stmt.ty, lhs_addr);
+
                                     Ok(OK);
                                 }
                             }
@@ -1125,44 +1167,10 @@ impl CodeGen for decaf::Stmt {
                         }
                     }
                     None => {
-                        match stmt.ty.array_lvl {
-                            0 => {
-                                let lhs_addr = match &stmt.ty.base {
-                                    IntTy | BoolTy | CharTy  => {
-                                        // Allocate the entire thing
-                                        // TODO: zero value
-                                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
-                                            // Allocate lhs
-                                            unsafe {
-                                                LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                generator.new_string_ptr(&stmt.name))
-                                            }
-                                        } else {
-                                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                        }
-                                    }
-                                    ClassTy(cls) => {
-                                        // Allocate ptr
-                                        // TODO: zero value
-                                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
-                                            unsafe {
-                                                LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                generator.new_string_ptr(&stmt.name))
-                                            }
-                                        } else {
-                                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                        }
-                                    }
-                                    VoidTy | NULLTy | UnknownTy(_) | StrTy => {
-                                        return Err(EInvalidLHSType(stmt.ty.clone()));
-                                    }
-                                };
-                                self.set_variable_addr(&stmt.name, &stmt.ty, lhs_addr);
-                                Ok(OK);
-                            }
-                            _ => {
-                                 Err(EUninitializedArray(format!("{:?}", stmt)));
-                            }
+                        if stmt.ty.array_lvl > 0 {
+                            Err(EUninitializedArray(format!("{:?}", stmt)))
+                        } else {
+                            Ok(OK)
                         }
                     }
                 }
@@ -1172,21 +1180,17 @@ impl CodeGen for decaf::Stmt {
                     Some(func_val) => {
                         // Evaluate condition
                         match stmt.cond.gencode(generator)? {
-                            NamedValue(_, vty, cond_val) | UnNamedValue(vty, cond_val) => {
+                            Value(cond_val) => {
                                 unsafe {
                                     let ifbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.new_string_ptr(
-                                            &format!("if_bb_{}", generator.next_if_index())));
+                                        generator.next_if_name());
                                     let nextbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.new_string_ptr(
-                                            &format!("next_bb_{}", generator.next_next_index())
-                                        )
-                                    );
-                                    LLVMBuildCondBr(generator.builder, cond_val, ifbb, nextbb);
+                                        generator.next_ifnext_name());
+                                    LLVMBuildCondBr(generator.builder, cond_val.get_value(generator), ifbb, nextbb);
 
                                     stmt.thenblock.gencode(generator)?;
 
@@ -1195,7 +1199,6 @@ impl CodeGen for decaf::Stmt {
                                     }
 
                                     LLVMPositionBuilderAtEnd(generator.builder, nextbb);
-
                                     Ok(OK)
                                 }
                             }
@@ -1209,28 +1212,24 @@ impl CodeGen for decaf::Stmt {
                 match generator.get_top_most_function_val() {
                     Some(func_val) => {
                         match stmt.cond.gencode(generator)? {
-                            NamedValue(_, vty, cond_val) | UnNamedValue(vty, cond_val) => {
+                            Value(cond_val) => {
                                 unsafe {
                                     let ifbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.new_string_ptr(
-                                            &format!("if_bb_{}", generator.next_if_index())));
+                                        generator.next_if_name());
                                     let elsebb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.new_string_ptr(
-                                            &format!("else_bb_{}", generator.next_else_index())
-                                        )
-                                    );
+                                        generator.next_else_name());
                                     let nextbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.new_string_ptr(
-                                            &format!("next_bb_{}", generator.next_next_index())
-                                        )
-                                    );
-                                    LLVMBuildCondBr(generator.builder, cond_val, ifbb, nextbb);
+                                        generator.next_ifelsenext_name());
+                                    LLVMBuildCondBr(generator.builder,
+                                                    cond_val.get_value(generator),
+                                                    ifbb,
+                                                    nextbb);
 
                                     LLVMPositionBuilderAtEnd(generator.builder, ifbb);
 
@@ -1266,7 +1265,8 @@ impl CodeGen for decaf::Stmt {
                 }
             }
             Expr(stmt) => {
-                stmt.expr.gencode(generator)
+                stmt.expr.gencode(generator)?;
+                Ok(OK)
             }
             While(stmt) => {
                 match generator.get_top_most_function_val() {
@@ -1275,23 +1275,15 @@ impl CodeGen for decaf::Stmt {
                             let condbb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.new_string_ptr(
-                                    &format!("whilecond_bb_{}", generator.next_whilecond_index())
-                                ));
+                                generator.next_whilecond_name());
                             let bodybb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.new_string_ptr(
-                                    &format!("whilebody_bb_{}", generator.next_whilebody_index())
-                                )
-                            );
+                                generator.next_whilebody_name());
                             let nextbb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.new_string_ptr(
-                                    &format!("whilenext_bb_{}", generator.next_whilenext_index())
-                                )
-                            );
+                                generator.next_whilenext_name());
 
                             *stmt.condbb.borrow_mut() = condbb.clone();
                             *stmt.bodybb.borrow_mut() = bodybb.clone();
@@ -1302,8 +1294,8 @@ impl CodeGen for decaf::Stmt {
                             LLVMPositionBuilderAtEnd(generator.builder, condbb);
 
                             match stmt.condexpr.gencode(generator)? {
-                                NamedValue(_, _, cond_val) | UnNamedValue(_, cond_val) => {
-                                    LLVMBuildCondBr(generator.builder, cond_val, bodybb, nextbb);
+                                Value(cond_val) => {
+                                    LLVMBuildCondBr(generator.builder, cond_val.get_value(generator), bodybb, nextbb);
 
                                     LLVMPositionBuilderAtEnd(generator.builder, bodybb);
 
@@ -1337,8 +1329,8 @@ impl CodeGen for decaf::Stmt {
                         unsafe {
                             if let Some(ret_expr) = &stmt.expr {
                                 match ret_expr.gencode(generator)? {
-                                    NamedValue(_, _, ret_val) | UnNamedValue(_, ret_val) => {
-                                        LLVMBuildRet(generator.builder, ret_val);
+                                    Value(ret_val) => {
+                                        LLVMBuildRet(generator.builder, ret_val.get_value(generator));
                                     }
                                     _ => Err(EValueNotFound(format!("{:?}", ret_expr)))
                                 }
@@ -1383,11 +1375,11 @@ impl CodeGen for decaf::Stmt {
                             let this_ref = LLVMGetFirstParam(func_val);
 
                             // Evaluate arguments
-                            let mut arg_vals = vec![];
+                            let mut arg_vals = vec![this_ref];
                             for arg in stmt.args.iter() {
                                 match arg.gencode(generator)? {
-                                    NamedValue(_, _, val) | UnNamedValue(_, val) => {
-                                        
+                                    Value(val) => {
+                                        arg_vals.push(val.get_value(generator));
                                     }
                                     _ => {
                                         return Err(EValueNotFound(format!("{:?}", arg)));
@@ -1397,7 +1389,14 @@ impl CodeGen for decaf::Stmt {
 
                             match generator.get_function_by_name(&stmt.sup_ctor.llvm_name()) {
                                 Some(ctor_val) => {
-
+                                    LLVMBuildCall(generator.builder,
+                                                  ctor_val,
+                                                  params!(arg_vals),
+                                                  arg_vals.len() as u32,
+                                                  generator.new_string_ptr(
+                                                      &format!("{}_{}",
+                                                               stmt.sup_ctor.llvm_name(),
+                                                               stmt.sup_ctor.next_refcount())))
                                 }
                                 None => Err(EFunctionNotFound(stmt.sup_ctor.llvm_name()))
                             }
@@ -1407,7 +1406,11 @@ impl CodeGen for decaf::Stmt {
                 }
             }
             Block(stmt) => {
-
+                generator.scopes.push(BlockScope(stmt.clone()));
+                for st in stmt.stmts.borrow().iter() {
+                    st.gencode(generator)?;
+                }
+                Ok(OK)
             }
             NOP => {}
 		}
@@ -1417,6 +1420,187 @@ impl CodeGen for decaf::Stmt {
 
 impl CodeGen for decaf::Expr {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
+		use decaf::Expr::*;
+        use DecafValue::*;
+        match self {
+            Assign(expr) => {
+                match expr.rhs.gencode(generator)? {
+                    Value(val_rhs) => {
+                        match expr.lhs.gencode(generator)? {
+                            Value(Addr(val_lhs)) => {
+                                // Assuming type checks done
+                                unsafe {
+                                    LLVMBuildStore(generator.builder,
+                                                   val_rhs.get_value(generator),
+                                                   val_lhs.addr.borrow().clone().unwrap());
+                                    // enable chained equal without exposing address
+                                    Value(Val(val_rhs.get_type(), val_rhs.get_value(generator)))
+                                }
+                            }
+                            Value(_) => Err(ENonAddressableValueOnLHS(format!("{:?}", expr.lhs))),
+                            _ => Err(EValueNotFound(format!("{:?}", expr.lhs)))
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr.rhs)))
+                }
+			}
+			BinArith(expr) => {
+                match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
+                    (Value(val_lhs), Value(val_rhs)) => {
+                        use crate::lnp::past::BinOp::*;
+                        unsafe {
+                            match expr.op {
+                                PlusOp => {
+                                    Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
+                                                 val_lhs.get_value(generator),
+                                                 val_rhs.get_value(generator),
+                                                 generator.next_add_name())))
+                                }
+                                MinusOp => {
+                                    let neg = LLVMBuildNeg(generator.builder,
+                                                           val_rhs.get_value(generator),
+                                                           generator.next_neg_name());
+                                    Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
+                                                 val_lhs.get_value(generator),
+                                                 neg,
+                                                 generator.next_add_name())))
+                                }
+                                TimesOp => {
+                                    Value(Val(val_rhs.get_type(), LLVMBuildMul(generator.builder,
+                                                 val_lhs.get_value(generator),
+                                                 val_rhs.get_value(generator),
+                                                 generator.next_mul_name())))
+                                }
+                                DivideOp => {
+                                    Value(Val(val_rhs.get_type(), LLVMBuildSDiv(generator.builder,
+                                                  val_lhs.get_value(generator),
+                                                  val_rhs.get_value(generator),
+                                                  generator.next_mul_name())))
+                                }
+                                ModOp => {
+                                    Value(Val(val_rhs.get_type(), LLVMBuildSRem(generator.builder,
+                                                  val_lhs.get_value(generator),
+                                                  val_rhs.get_value(generator),
+                                                  generator.next_mod_name())))
+                                }
+                                _ => Err(ENonArithOp(format!("{:?}", expr.op)))
+                            }
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
+			}
+			UnArith(expr) => {
+                use crate::lnp::past::UnOp::*;
+                match expr.rhs.gencode(generator)? {
+                    Value(val_rhs) => {
+                        unsafe {
+                            match expr.op {
+                                PlusUOp => {
+                                    Value(Val(val_rhs.get_type(), val_rhs.get_value(generator)))
+                                }
+                                MinusUOp => {
+                                    Value(Val(val_rhs.get_type(), LLVMBuildNeg(
+                                        generator.builder,
+                                        val_rhs.get_value(generator),
+                                        generator.next_neg_name())))
+                                }
+                                _ => Err(EUnaryArithNotFound(format!("{:?}", expr.op)))
+                            }
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
+			}
+			BinLogical(expr) => {
+                 match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
+                     (Value(val_lhs), Value(val_rhs)) => {
+                         use crate::lnp::past::BinOp::*;
+                         unsafe {
+                             match expr.op {
+                                 LogicalAndOp => {
+                                     Value(Val(val_lhs.get_type(),
+                                               LLVMBuildAnd(generator.builder,
+                                                            val_lhs.get_value(generator),
+                                                            val_rhs.get_value(generator),
+                                                            generator.next_and_name())))
+                                 }
+                                 LogicalOrOp => {
+                                     // TODO: c-type or
+                                     Value(Val(val_lhs.get_type(),
+                                               LLVMBuildOr(generator.builder,
+                                                           val_lhs.get_value(generator),
+                                                           val_rhs.get_value(generator),
+                                                           generator.next_or_name())))
+                                 }
+                                 _ => Err(ENonLogicalOp(format!("{:?}", expr.op)))
+                             }
+                         }
+                     }
+                     _ => Err(EValueNotFound(format!("{:?}", expr)))
+                 }
+			}
+			UnNot(expr) => {
+                match expr.gencode(generator)? {
+                    Value(val) => {
+                        unsafe {
+                            Value(Val(val.get_type(),
+                                      LLVMBuildNot(generator.builder,
+                                                   val.get_value(generator),
+                                                   generator.next_not_name())))
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
+			}
+			BinCmp(expr) => {
+                match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
+                    (Value(val_lhs), Value(val_rhs)) => {
+                        use crate::lnp::past::BinOp::*;
+                        unsafe {
+                            match expr.op {
+                                GreaterThanOp => {
+                                }
+                                GreaterOrEqOp => {
+                                }
+                                LessThanOp => {
+                                }
+                                LessOrEqOp => {
+                                }
+                                EqualsOp => {
+                                }
+                                NotEqualsOp => {
+                                }
+                                _ => Err(ENonCmpOp(format!("{:?}", expr.op)))
+                            }
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
+			}
+			CreateArray(expr) => {
+			}
+			Literal(expr) => {
+			}
+			This(expr) => {
+			}
+			CreateObj(expr) => {
+			}
+			MethodCall(expr) => {
+			}
+			SuperCall(expr) => {
+			}
+			ArrayAccess(expr) => {
+			}
+			FieldAccess(expr) => {
+			}
+			Variable(expr) => {
+			}
+			ClassId(expr) => {
+			}
+			NULL => {
+			}
+        }
 		Err(ENotImplemented)
 	}
 }
