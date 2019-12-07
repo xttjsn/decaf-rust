@@ -3,33 +3,25 @@ extern crate tempfile;
 
 use std::ffi::{CStr, CString};
 use std::collections::BTreeMap;
-use llvm_sys::core::*;
-use llvm_sys::prelude::*;
-use llvm_sys::target::*;
-use llvm_sys::target_machine::*;
-use llvm_sys::transforms::pass_manager_builder::*;
+use llvm_sys::{core::*, prelude::*, target::*, target_machine::*,
+               transforms::pass_manager_builder::*, LLVMIntPredicate::*};
+
 use crate::treebuild::{DecafTreeBuilder, Program};
 use crate::decaf;
+use crate::decaf::{Returnable, Value, VTable, Scope::*, Expr::*, TypeBase::*, Visibility::*, LiteralExpr::*, Stmt::*, Class, Variable, VariableTable, BlockStmt};
 use crate::shell;
 use CompileError::*;
 
 use tempfile::NamedTempFile;
 use std::str;
-
 use std::ptr;
 use std::ptr::null_mut;
-
 use std::rc::Rc;
-
 use std::mem;
-
-use self::CodeValue::*;
 use std::cell::Ref;
-use crate::decaf::{Visibility, Returnable};
-use self::llvm_sys::debuginfo::LLVMTemporaryMDNode;
-use crate::treebuild::SemanticError::EUninitializedArray;
-use crate::decaf::Scope::{BlockScope, WhileScope};
-use self::llvm_sys::bit_reader::LLVMParseBitcode2;
+use DecafValue::*;
+use CodeValue::*;
+use std::borrow::BorrowMut;
 
 pub const ADDRESS_SPACE_GENERIC: ::libc::c_uint = 0;
 pub const ADDRESS_SPACE_GLOBAL: ::libc::c_uint = 1;
@@ -77,7 +69,16 @@ macro_rules! bool_type {
       () => {
           unsafe {  LLVMInt1Type() }
       }
-    }
+}
+
+macro_rules! decaf_bool_type {
+	() => {
+		decaf::Type {
+			base: BoolTy,
+			array_lvl: 0
+		}
+	}
+}
 
 macro_rules! void_type {
       () => {
@@ -109,9 +110,27 @@ macro_rules! name {
       ($id:expr) => { $id.as_ptr() as *const _ }
 }
 
+macro_rules! const_i64 {
+      ($val:expr) => {
+          unsafe { LLVMConstInt(int_type!(), $val as u64, 0) }
+      }
+}
+
+macro_rules! const_bool {
+	($val:expr) => {
+		unsafe { LLVMConstInt(bool_type!(), $val as u64, 0) }
+	}
+}
+
+macro_rules! const_char {
+	($val:expr) => {
+		unsafe { LLVMConstInt(char_type!(), $val as u64, 0) }
+	}
+}
+
 macro_rules! indices {
     ($($arg:tt)*) => ({
-        vec![$($arg)*].iter().map(|v| LLVMConstInt(i32_type!(), *v, 0)).collect::<Vec<LLVMValueRef>>().as_slice().as_ptr() as *mut _
+        vec![$($arg)*].iter().map(|v| LLVMConstInt(i32_type!(), (*v) as u64, 0)).collect::<Vec<LLVMValueRef>>().as_slice().as_ptr() as *mut _
     })
 }
 
@@ -134,7 +153,6 @@ pub enum DecafValue {
 
 impl DecafValue {
     pub fn get_type(&self) -> decaf::Type {
-        use DecafValue::*;
         match self {
             Addr(val) => {
                 val.ty.clone()
@@ -143,7 +161,6 @@ impl DecafValue {
         }
     }
     pub fn get_value(&self, generator: &mut CodeGenerator) -> LLVMValueRef {
-        use DecafValue::*;
         match self {
             Addr(val) => {
                 unsafe {
@@ -152,7 +169,7 @@ impl DecafValue {
                                   generator.new_string_ptr(&format!("{}_ref_{}", val.name, val.next_refcount())))
                 }
             }
-            Val(_, val) => val
+            Val(_, val) => val.clone()
         }
     }
 }
@@ -175,12 +192,18 @@ pub enum CompileError {
     EUnknownType(String),
     EUninitializedArray(String),
     EBlockNotInFunction(String),
+    EArrayZeroDim(String),
     ELoopLacksCondBB(String),
     ENonAddressableValueOnLHS(String),
     ENonArithOp(String),
     ENonLogicalOp(String),
     EUnaryArithNotFound(String),
     ENonCmpOp(String),
+    EInvalidStringCreation(String),
+    EArrayNotSupportMethodCall(String),
+    ENonClassNotSupportMethodCall(String),
+    EMethodNotFoundInVTable(String),
+    EThisNotFound,
     EInvalidLHSType(decaf::Type),
 }
 
@@ -306,18 +329,19 @@ pub struct CodeGenerator {
 	strings: Vec<CString>,
     state: GenState,
     scopes: Vec<decaf::Scope>,
+	names: BTreeMap<String, u32>,
+	classes: BTreeMap<String, Rc<Class>>,
 }
 
 pub fn new_generator(module_name: &str, target_triple: Option<String>) -> CodeGenerator {
 	CodeGenerator::new(module_name, target_triple)
 }
 
-
 impl CodeGenerator {
 	fn new(module_name: &str, target_triple: Option<String>) -> Self {
 		let ctx = unsafe { LLVMContextCreate() };
 		CodeGenerator {
-			ctx: ctx,
+			ctx,
 			builder: unsafe { LLVMCreateBuilderInContext(ctx) },
 			module: create_module(module_name, target_triple.clone()),
 			types_map: BTreeMap::new(),
@@ -328,6 +352,8 @@ impl CodeGenerator {
 			strings: Vec::new(),
             state: GenState::First,
             scopes: Vec::new(),
+			names: BTreeMap::new(),
+			classes: BTreeMap::new(),
 		}
 	}
 
@@ -360,18 +386,22 @@ impl CodeGenerator {
                 Some(base_llvm_ty)
             }
         } else {
-            let mut curr_ty = base_llvm_ty;
             let mut lvl = ty.array_lvl;
-            while lvl > 0 {
-                unsafe {
-                    curr_ty = LLVMPointerType(curr_ty, ADDRESS_SPACE_GENERIC);
+            let mut curr_ty = base_llvm_ty;
+            unsafe {
+                loop {
+                    let mut field_types = [curr_ty, int_type!()];
+                    curr_ty = LLVMStructType((&mut field_types[0]) as *mut _, 2, 0);
+                    lvl -= 1;
+                    if lvl == 0 {
+                        break
+                    }
                 }
-                lvl -= 1;
             }
             if want_ptr {
                 Some(unsafe { LLVMPointerType(curr_ty.clone(), ADDRESS_SPACE_GENERIC) })
             } else {
-                Some(curr_ty);
+                Some(curr_ty)
             }
         }
     }
@@ -417,6 +447,89 @@ impl CodeGenerator {
         }
     }
 
+	fn class_lookup(&self, cls_name: &str) -> Option<Rc<decaf::Class>> {
+		match self.classes.get(cls_name.into()) {
+			None => None,
+			Some(cls) => Some(cls.clone())
+		}
+	}
+
+	fn get_top_most_function_val(&self) -> Option<LLVMValueRef> {
+		use decaf::Scope::*;
+		for scope in self.scopes.iter().rev() {
+			match scope {
+				CtorScope(func_scope) => {
+					return self.get_function_by_name(&func_scope.llvm_name());
+				}
+				MethodScope(func_scope) => {
+					return self.get_function_by_name(&func_scope.llvm_name());
+				}
+				_ => continue,
+			}
+		}
+		None
+	}
+
+    fn get_top_most_block(&self) -> Option<Rc<BlockStmt>> {
+        for scope in self.scopes.iter().rev() {
+            match scope {
+                BlockScope(blk) => {
+                    return Some(blk.clone())
+                }
+                _ => continue,
+            }
+        }
+        None
+    }
+
+	fn cast_value(&mut self, src_ty: &decaf::Type, dst_ty: &decaf::Type, val: LLVMValueRef) -> LLVMValueRef {
+		// Only cast pointer type
+		if src_ty.is_compatible_with(dst_ty) {
+			let is_ptr = {
+				if src_ty.array_lvl > 0 {
+					true
+				} else if let ClassTy(_) = src_ty.base {
+					true
+				} else {
+					false
+				}
+			};
+			if is_ptr {
+				if src_ty.array_lvl == dst_ty.array_lvl {
+					if src_ty.base != dst_ty.base {
+                        unsafe {
+                            LLVMBuildPointerCast(
+                                self.builder,
+                                val,
+                                self.get_llvm_type_from_decaf_type(dst_ty, false).unwrap(),
+                                self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
+                        }
+					} else {
+						val
+					}
+				} else {
+					panic!("casting will change array_lvl: src_type: {:?}, dst_type: {:?}", src_ty, dst_ty);
+				}
+			} else {
+				val
+			}
+		} else {
+			panic!("casting incompatible types. src_type: {:?}, dst_type: {:?}", src_ty, dst_ty);
+		}
+	}
+
+	fn variable_lookup(&self, name: &str) -> Option<Rc<Variable>> {
+		for scope in self.scopes.iter().rev() {
+			match scope.variable_lookup(name){
+				Some(var) => {
+					return Some(var);
+				}
+				_ => continue,
+			}
+		}
+		None
+	}
+
     fn get_global_by_name(&self, name: &str) -> Option<LLVMValueRef> {
         match self.global_map.get(name.into()) {
             None => None,
@@ -459,20 +572,10 @@ impl CodeGenerator {
 		ptr
 	}
 
-    fn new_md_from_vals(&mut self, vals: &mut Vec<LLVMValueRef>) -> Option<LLVMMetadataRef> {
-        if vals.len() > 0 {
-            unsafe {
-                Some(LLVMMDNodeInContext(self.ctx,
-                                    vals.as_mut_slice().as_mut_ptr() as *mut _,
-                                    vals.len() as u32));
-                Some(LLVMTemporaryMDNode(self.ctx,
-                                         vals.as_mut_slice().as_mut_ptr() as *mut _,
-                                         vals.len()))
-            }
-        } else {
-            None
-        }
-    }
+	pub fn next_name(&mut self, name: &str) -> *const i8 {
+        *self.names.entry(name.into()).or_insert(0).borrow_mut() += 1;
+        self.new_string_ptr(&format!("{}_{}", name, self.names.get(name.into()).unwrap()))
+	}
 
 	pub fn optimize(&mut self, llvm_opt: i64) {
 		unsafe {
@@ -724,8 +827,12 @@ impl CodeGenerator {
 		self.gen_builtin();
 		self.add_main_fn();
 
+		for cls in program.classes.iter() {
+			self.classes.insert(cls.name.clone(), cls.clone());
+		}
+
         for cls in &program.classes {
-            match cls.gencode(self) {
+            match cls.clone().gencode(self) {
                 Ok(_) => {}
                 Err(e) => {
                     return Err(format!("Compile error {:?}", e));
@@ -755,24 +862,32 @@ fn ty2llvmty(ty: &decaf::Type) -> LLVMTypeRef {
     if ty.array_lvl == 0 {
         base_llvm_ty
     } else {
-        let mut curr_ty = base_llvm_ty;
         let mut lvl = ty.array_lvl;
-        while lvl > 0 {
-            unsafe {
-                curr_ty = LLVMPointerType(curr_ty, ADDRESS_SPACE_GENERIC);
+        let mut curr_ty = base_llvm_ty;
+        unsafe {
+            loop {
+                let mut field_types = [curr_ty, int_type!()];
+                curr_ty = LLVMStructType((&mut field_types[0]) as *mut _, 2, 0);
+                lvl -= 1;
+                if lvl == 0 {
+                    break
+                }
             }
-            lvl -= 1;
         }
         curr_ty
     }
+}
+
+trait CodeGenRc {
+    fn gencode(self: Rc<Self>, generator: &mut CodeGenerator) -> GenCodeResult;
 }
 
 trait CodeGen {
     fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult;
 }
 
-impl CodeGen for decaf::Class {
-	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
+impl CodeGenRc for decaf::Class {
+	fn gencode(self: Rc<Self>, generator: &mut CodeGenerator) -> GenCodeResult {
 
         // Skip built-in classes
         if self.name == "Object" || self.name == "String" || self.name == "IO" {
@@ -975,39 +1090,39 @@ impl CodeGen for decaf::Class {
             GenState::Second => {
                 // Visit each ctor/method/static method
                 for (ix, ctor) in self.pub_ctors.borrow().iter().enumerate() {
-                    ctor.gencode(generator)?;
+                    ctor.clone().gencode(generator)?;
                 }
 
                 for (ix, ctor) in self.prot_ctors.borrow().iter().enumerate() {
-                    ctor.gencode(generator)?;
+                    ctor.clone().gencode(generator)?;
                 }
 
                 for (ix, ctor) in self.priv_ctors.borrow().iter().enumerate() {
-                    ctor.gencode(generator)?;
+                    ctor.clone().gencode(generator)?;
                 }
 
                 for (ix, method) in self.pub_methods.borrow().iter().enumerate() {
-                    method.gencode(generator)?;
+                    method.clone().gencode(generator)?;
                 }
 
                 for (ix, method) in self.prot_methods.borrow().iter().enumerate() {
-                    method.gencode(generator)?;
+                    method.clone().gencode(generator)?;
                 }
 
                 for (ix, method) in self.priv_methods.borrow().iter().enumerate() {
-                    method.gencode(generator)?;
+                    method.clone().gencode(generator)?;
                 }
 
                 for (ix, static_method) in self.pub_static_methods.borrow().iter().enumerate() {
-                    static_method.gencode(generator)?;
+                    static_method.clone().gencode(generator)?;
                 }
 
                 for (ix, static_method) in self.prot_static_methods.borrow().iter().enumerate() {
-                    static_method.gencode(generator)?;
+                    static_method.clone().gencode(generator)?;
                 }
 
                 for (ix, static_method) in self.priv_static_methods.borrow().iter().enumerate() {
-                    static_method.gencode(generator)?;
+                    static_method.clone().gencode(generator)?;
                 }
             }
         }
@@ -1016,10 +1131,9 @@ impl CodeGen for decaf::Class {
 	}
 }
 
-impl CodeGen for decaf::Ctor {
-    fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-        use decaf::Scope::*;
-        assert!(generator.state, GenState::Second);
+impl CodeGenRc for decaf::Ctor {
+    fn gencode(self: Rc<Self>, generator: &mut CodeGenerator) -> GenCodeResult {
+        assert!(generator.state == GenState::Second);
         // Get function llvm value
 		let name = self.llvm_name();
 		match generator.get_function_by_name(&name) {
@@ -1036,12 +1150,21 @@ impl CodeGen for decaf::Ctor {
 					LLVMPositionBuilderAtEnd(generator.builder, ctor_bb);
 				}
 
-                self.scopes.push(MethodScope(method.clone()));
+                generator.scopes.push(CtorScope(self.clone()));
+
+				// Set argument variable address
+				let this_ref = unsafe { LLVMGetFirstParam(ctor_llvm_val) };
+				self.vartbl.borrow_mut().set_addr_for_name("this", this_ref);
+
+				for (ix, (arg_name, _)) in self.args.borrow().iter().enumerate() {
+					let arg_val = unsafe { LLVMGetParam(ctor_llvm_val, ix as u32 + 1) };
+					self.vartbl.borrow_mut().set_addr_for_name(arg_name, arg_val);
+				}
 
 				// Visit body
 				let ret = decaf::Stmt::Block(self.body.borrow().clone().unwrap()).gencode(generator);
 
-                self.scopes.pop();
+                generator.scopes.pop();
 
                 ret
 			}
@@ -1050,10 +1173,9 @@ impl CodeGen for decaf::Ctor {
 	}
 }
 
-impl CodeGen for decaf::Method {
-	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-        use decaf::Scope::*;
-        assert!(generator.state, GenState::Second);
+impl CodeGenRc for decaf::Method {
+	fn gencode(self: Rc<Self>, generator: &mut CodeGenerator) -> GenCodeResult {
+        assert!(generator.state == GenState::Second);
 		let name = self.llvm_name();
 		match generator.get_function_by_name(&name) {
 			Some(method_llvm_val) => {
@@ -1069,12 +1191,21 @@ impl CodeGen for decaf::Method {
 					LLVMPositionBuilderAtEnd(generator.builder, method_bb);
 				}
 
-                self.scopes.push(MethodScope(method.clone()));
+                generator.scopes.push(MethodScope(self.clone()));
+
+				// Set argument variable address
+				let this_ref = unsafe { LLVMGetFirstParam(method_llvm_val) };
+				self.vartbl.borrow_mut().set_addr_for_name("this", this_ref);
+
+				for (ix, (arg_name, _)) in self.args.borrow().iter().enumerate() {
+					let arg_val = unsafe { LLVMGetParam(method_llvm_val, ix as u32 + 1) };
+					self.vartbl.borrow_mut().set_addr_for_name(arg_name, arg_val);
+				}
 
 				// Visit body
                 let ret = decaf::Stmt::Block(self.body.borrow().clone().unwrap()).gencode(generator);
 
-                self.scopes.pop();
+                generator.scopes.pop();
 
                 ret
 			}
@@ -1085,82 +1216,49 @@ impl CodeGen for decaf::Method {
 
 impl CodeGen for decaf::Stmt {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-        assert!(generator.state, GenState::Second);
-        use CompileError::*;
-        use decaf::Stmt::*;
-        use CodeValue::*;
-        use decaf::TypeBase::*;
+        assert!(generator.state == GenState::Second);
 		match self {
             Declare(stmt) => {
-                let lhs_addr = match &stmt.ty.base {
-                    IntTy | BoolTy | CharTy  => {
-                        // Allocate the entire thing
-                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
-                            // Allocate lhs
-                            unsafe {
-                                LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                generator.new_string_ptr(&stmt.name))
+                let lhs_addr = {
+                    let want_ptr =  {
+                        match &stmt.ty.base {
+                            ClassTy(_) => true,
+                            IntTy | BoolTy | CharTy => match stmt.ty.array_lvl == 0 {
+                                true => false,
+                                false => true,
+                            },
+                            _ => {
+                                return Err(EInvalidLHSType(stmt.ty.clone()));
                             }
-                        } else {
-                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
                         }
-                    }
-                    ClassTy(cls) => {
-                        // Allocate ptr
-                        if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
-                            unsafe {
-                                LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                generator.new_string_ptr(&stmt.name))
-                            }
-                        } else {
-                            return Err(EUnknownType(format!("{:?}", stmt.ty)));
+                    };
+                    // Allocate the entire thing
+                    if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, want_ptr) {
+                        // Allocate lhs
+                        unsafe {
+                            LLVMBuildAlloca(generator.builder, llvm_ty,
+                                            generator.new_string_ptr(&stmt.name))
                         }
-                    }
-                    VoidTy | NULLTy | UnknownTy(_) | StrTy => {
-                        return Err(EInvalidLHSType(stmt.ty.clone()));
+                    } else {
+                        return Err(EUnknownType(format!("{:?}", stmt.ty)));
                     }
                 };
 
-                self.set_variable_addr(&stmt.name, &stmt.ty, lhs_addr);
+                let blk = generator.get_top_most_block().unwrap();
+                blk.vartbl.borrow_mut().set_addr_for_name(&stmt.name, lhs_addr);
 
                 match &stmt.init_expr {
                     Some(expr) => {
                         match expr.gencode(generator)? {
-                            Value(val) => {
+                            CodeValue::Value(val) => {
                                 if stmt.ty.is_compatible_with(&val.get_type()) {
-                                    let lhs_addr = match &stmt.ty.base {
-                                        IntTy | BoolTy | CharTy  => {
-                                            // Allocate the entire thing
-                                            if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, false) {
-                                                // Allocate lhs
-                                                unsafe {
-                                                    LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                    generator.new_string_ptr(&stmt.name))
-                                                }
-                                            } else {
-                                                return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                            }
-                                        }
-                                        ClassTy(cls) => {
-                                            // Allocate ptr
-                                            if let Some(llvm_ty) = generator.get_llvm_type_from_decaf_type(&stmt.ty, true) {
-                                                unsafe {
-                                                    LLVMBuildAlloca(generator.builder, llvm_ty,
-                                                                    generator.new_string_ptr(&stmt.name))
-                                                }
-                                            } else {
-                                                return Err(EUnknownType(format!("{:?}", stmt.ty)));
-                                            }
-                                        }
-                                        VoidTy | NULLTy | UnknownTy(_) | StrTy => {
-                                            return Err(EInvalidLHSType(stmt.ty.clone()));
-                                        }
-                                    };
                                     unsafe {
                                         LLVMBuildStore(generator.builder, val.get_value(generator), lhs_addr);
                                     }
 
-                                    Ok(OK);
+                                    Ok(OK)
+                                } else {
+                                    Ok(OK)
                                 }
                             }
                             _ => Err(EValueNotFound(format!("{:?}", expr)))
@@ -1180,21 +1278,21 @@ impl CodeGen for decaf::Stmt {
                     Some(func_val) => {
                         // Evaluate condition
                         match stmt.cond.gencode(generator)? {
-                            Value(cond_val) => {
+                            CodeValue::Value(cond_val) => {
                                 unsafe {
                                     let ifbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.next_if_name());
+                                        generator.next_name("if"));
                                     let nextbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.next_ifnext_name());
+                                        generator.next_name("ifnext"));
                                     LLVMBuildCondBr(generator.builder, cond_val.get_value(generator), ifbb, nextbb);
 
-                                    stmt.thenblock.gencode(generator)?;
+                                    Block(stmt.thenblock.clone()).gencode(generator)?;
 
-                                    if !Block(stmt.thenblock.clone()).returnable() {
+                                    if let None = Block(stmt.thenblock.clone()).returnable() {
                                         LLVMBuildBr(generator.builder, nextbb);
                                     }
 
@@ -1212,20 +1310,20 @@ impl CodeGen for decaf::Stmt {
                 match generator.get_top_most_function_val() {
                     Some(func_val) => {
                         match stmt.cond.gencode(generator)? {
-                            Value(cond_val) => {
+                            CodeValue::Value(cond_val) => {
                                 unsafe {
                                     let ifbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.next_if_name());
+                                        generator.next_name("if"));
                                     let elsebb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.next_else_name());
+                                        generator.next_name("else"));
                                     let nextbb = LLVMAppendBasicBlockInContext(
                                         generator.ctx,
                                         func_val,
-                                        generator.next_ifelsenext_name());
+                                        generator.next_name("ifelsenext"));
                                     LLVMBuildCondBr(generator.builder,
                                                     cond_val.get_value(generator),
                                                     ifbb,
@@ -1235,11 +1333,11 @@ impl CodeGen for decaf::Stmt {
 
                                     generator.scopes.push(BlockScope(stmt.thenblock.clone()));
 
-                                    stmt.thenblock.gencode(generator)?;
+                                    Block(stmt.thenblock.clone()).gencode(generator)?;
 
                                     generator.scopes.pop();
 
-                                    if !Block(stmt.thenblock.clone()).returnable() {
+                                    if let None = Block(stmt.thenblock.clone()).returnable() {
                                         LLVMBuildBr(generator.builder, nextbb);
                                     }
 
@@ -1247,15 +1345,17 @@ impl CodeGen for decaf::Stmt {
 
                                     generator.scopes.push(BlockScope(stmt.elseblock.clone()));
 
-                                    stmt.elseblock.gencode(generator)?;
+                                    Block(stmt.elseblock.clone()).gencode(generator)?;
 
                                     generator.scopes.pop();
 
-                                    if !Block(stmt.elseblock.clone()).returnable() {
+                                    if let None = Block(stmt.elseblock.clone()).returnable() {
                                         LLVMBuildBr(generator.builder, elsebb);
                                     }
 
                                     LLVMPositionBuilderAtEnd(generator.builder, nextbb);
+
+                                    Ok(OK)
                                 }
                             }
                             _ => Err(EValueNotFound(format!("{:?}", stmt.cond)))
@@ -1275,26 +1375,26 @@ impl CodeGen for decaf::Stmt {
                             let condbb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.next_whilecond_name());
+                                generator.next_name("whilecond"));
                             let bodybb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.next_whilebody_name());
+                                generator.next_name("whilebody"));
                             let nextbb = LLVMAppendBasicBlockInContext(
                                 generator.ctx,
                                 func_val,
-                                generator.next_whilenext_name());
+                                generator.next_name("whilenext"));
 
-                            *stmt.condbb.borrow_mut() = condbb.clone();
-                            *stmt.bodybb.borrow_mut() = bodybb.clone();
-                            *stmt.nextbb.borrow_mut() = nextbb.clone();
+                            *stmt.condbb.borrow_mut() = Some(condbb.clone());
+                            *stmt.bodybb.borrow_mut() = Some(bodybb.clone());
+                            *stmt.nextbb.borrow_mut() = Some(nextbb.clone());
 
                             LLVMBuildBr(generator.builder, condbb);
 
                             LLVMPositionBuilderAtEnd(generator.builder, condbb);
 
                             match stmt.condexpr.gencode(generator)? {
-                                Value(cond_val) => {
+                                CodeValue::Value(cond_val) => {
                                     LLVMBuildCondBr(generator.builder, cond_val.get_value(generator), bodybb, nextbb);
 
                                     LLVMPositionBuilderAtEnd(generator.builder, bodybb);
@@ -1303,18 +1403,19 @@ impl CodeGen for decaf::Stmt {
 
                                     generator.scopes.push(BlockScope(stmt.bodyblock.borrow().clone().unwrap()));
 
-                                    stmt.bodyblock.borrow().as_ref().unwrap().gencode(generator);
+                                    Block(stmt.bodyblock.borrow().clone().unwrap()).gencode(generator)?;
 
                                     generator.scopes.pop();
 
                                     generator.scopes.pop();
 
                                     // NOTE: we might add Br no matter what
-                                    if !Block(stmt.bodyblock.borrow().clone().unwrap()).returnable() {
+                                    if let None = Block(stmt.bodyblock.borrow().clone().unwrap()).returnable() {
                                         LLVMBuildBr(generator.builder, condbb);
                                     }
 
                                     LLVMPositionBuilderAtEnd(generator.builder, nextbb);
+                                    Ok(OK)
                                 }
                                 _ => Err(EValueNotFound(format!("{:?}", stmt.condexpr)))
                             }
@@ -1329,13 +1430,15 @@ impl CodeGen for decaf::Stmt {
                         unsafe {
                             if let Some(ret_expr) = &stmt.expr {
                                 match ret_expr.gencode(generator)? {
-                                    Value(ret_val) => {
+                                    CodeValue::Value(ret_val) => {
                                         LLVMBuildRet(generator.builder, ret_val.get_value(generator));
+                                        Ok(OK)
                                     }
                                     _ => Err(EValueNotFound(format!("{:?}", ret_expr)))
                                 }
                             } else {
                                 LLVMBuildRetVoid(generator.builder);
+                                Ok(OK)
                             }
                         }
                     }
@@ -1347,6 +1450,7 @@ impl CodeGen for decaf::Stmt {
                     Some(condbb) => {
                         unsafe {
                             LLVMBuildBr(generator.builder, condbb);
+                            Ok(OK)
                         }
                     }
                     None => {
@@ -1359,6 +1463,7 @@ impl CodeGen for decaf::Stmt {
                     Some(nextbb) => {
                         unsafe {
                             LLVMBuildBr(generator.builder, nextbb);
+                            Ok(OK)
                         }
                     }
                     None => {
@@ -1378,7 +1483,7 @@ impl CodeGen for decaf::Stmt {
                             let mut arg_vals = vec![this_ref];
                             for arg in stmt.args.iter() {
                                 match arg.gencode(generator)? {
-                                    Value(val) => {
+                                    CodeValue::Value(val) => {
                                         arg_vals.push(val.get_value(generator));
                                     }
                                     _ => {
@@ -1386,17 +1491,17 @@ impl CodeGen for decaf::Stmt {
                                     }
                                 }
                             }
-
+                            let len = arg_vals.len();
                             match generator.get_function_by_name(&stmt.sup_ctor.llvm_name()) {
                                 Some(ctor_val) => {
                                     LLVMBuildCall(generator.builder,
                                                   ctor_val,
                                                   params!(arg_vals),
-                                                  arg_vals.len() as u32,
-                                                  generator.new_string_ptr(
-                                                      &format!("{}_{}",
-                                                               stmt.sup_ctor.llvm_name(),
-                                                               stmt.sup_ctor.next_refcount())))
+                                                  len as u32,
+                                                  generator.next_name(
+                                                      &format!("function_call_{}",
+                                                               stmt.sup_ctor.llvm_name())));
+                                    Ok(OK)
                                 }
                                 None => Err(EFunctionNotFound(stmt.sup_ctor.llvm_name()))
                             }
@@ -1412,32 +1517,33 @@ impl CodeGen for decaf::Stmt {
                 }
                 Ok(OK)
             }
-            NOP => {}
+            NOP => Ok(OK)
 		}
-		Err(ENotImplemented)
 	}
 }
 
 impl CodeGen for decaf::Expr {
 	fn gencode(&self, generator: &mut CodeGenerator) -> GenCodeResult {
-		use decaf::Expr::*;
-        use DecafValue::*;
-        match self {
+        match &*self {
             Assign(expr) => {
-                match expr.rhs.gencode(generator)? {
-                    Value(val_rhs) => {
-                        match expr.lhs.gencode(generator)? {
-                            Value(Addr(val_lhs)) => {
+                match (&*expr.rhs).gencode(generator)? {
+                    CodeValue::Value(val_rhs) => {
+                        match (&*expr.lhs).gencode(generator)? {
+                            CodeValue::Value(Addr(val_lhs)) => {
                                 // Assuming type checks done
                                 unsafe {
+									let llvm_val = val_rhs.get_value(generator);
+									let casted_val = generator.cast_value(&val_rhs.get_type(),
+																		  &val_lhs.ty,
+																		  llvm_val);
                                     LLVMBuildStore(generator.builder,
-                                                   val_rhs.get_value(generator),
+                                                   casted_val,
                                                    val_lhs.addr.borrow().clone().unwrap());
                                     // enable chained equal without exposing address
-                                    Value(Val(val_rhs.get_type(), val_rhs.get_value(generator)))
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), val_rhs.get_value(generator))))
                                 }
                             }
-                            Value(_) => Err(ENonAddressableValueOnLHS(format!("{:?}", expr.lhs))),
+                            CodeValue::Value(_) => Err(ENonAddressableValueOnLHS(format!("{:?}", expr.lhs))),
                             _ => Err(EValueNotFound(format!("{:?}", expr.lhs)))
                         }
                     }
@@ -1445,43 +1551,43 @@ impl CodeGen for decaf::Expr {
                 }
 			}
 			BinArith(expr) => {
-                match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
-                    (Value(val_lhs), Value(val_rhs)) => {
+                match ((&*expr.lhs).gencode(generator)?, (&*expr.rhs).gencode(generator)?) {
+                    (CodeValue::Value(val_lhs), CodeValue::Value(val_rhs)) => {
                         use crate::lnp::past::BinOp::*;
                         unsafe {
                             match expr.op {
                                 PlusOp => {
-                                    Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
                                                  val_lhs.get_value(generator),
                                                  val_rhs.get_value(generator),
-                                                 generator.next_add_name())))
+                                                 generator.next_name("add")))))
                                 }
                                 MinusOp => {
                                     let neg = LLVMBuildNeg(generator.builder,
                                                            val_rhs.get_value(generator),
-                                                           generator.next_neg_name());
-                                    Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
+                                                           generator.next_name("neg"));
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildAdd(generator.builder,
                                                  val_lhs.get_value(generator),
                                                  neg,
-                                                 generator.next_add_name())))
+                                                 generator.next_name("add")))))
                                 }
                                 TimesOp => {
-                                    Value(Val(val_rhs.get_type(), LLVMBuildMul(generator.builder,
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildMul(generator.builder,
                                                  val_lhs.get_value(generator),
                                                  val_rhs.get_value(generator),
-                                                 generator.next_mul_name())))
+                                                 generator.next_name("mul")))))
                                 }
                                 DivideOp => {
-                                    Value(Val(val_rhs.get_type(), LLVMBuildSDiv(generator.builder,
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildSDiv(generator.builder,
                                                   val_lhs.get_value(generator),
                                                   val_rhs.get_value(generator),
-                                                  generator.next_mul_name())))
+                                                  generator.next_name("div")))))
                                 }
                                 ModOp => {
-                                    Value(Val(val_rhs.get_type(), LLVMBuildSRem(generator.builder,
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildSRem(generator.builder,
                                                   val_lhs.get_value(generator),
                                                   val_rhs.get_value(generator),
-                                                  generator.next_mod_name())))
+                                                  generator.next_name("mod")))))
                                 }
                                 _ => Err(ENonArithOp(format!("{:?}", expr.op)))
                             }
@@ -1492,18 +1598,18 @@ impl CodeGen for decaf::Expr {
 			}
 			UnArith(expr) => {
                 use crate::lnp::past::UnOp::*;
-                match expr.rhs.gencode(generator)? {
-                    Value(val_rhs) => {
+                match (&*expr.rhs).gencode(generator)? {
+                    CodeValue::Value(val_rhs) => {
                         unsafe {
                             match expr.op {
                                 PlusUOp => {
-                                    Value(Val(val_rhs.get_type(), val_rhs.get_value(generator)))
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), val_rhs.get_value(generator))))
                                 }
                                 MinusUOp => {
-                                    Value(Val(val_rhs.get_type(), LLVMBuildNeg(
+                                    Ok(CodeValue::Value(Val(val_rhs.get_type(), LLVMBuildNeg(
                                         generator.builder,
                                         val_rhs.get_value(generator),
-                                        generator.next_neg_name())))
+                                        generator.next_name("neg")))))
                                 }
                                 _ => Err(EUnaryArithNotFound(format!("{:?}", expr.op)))
                             }
@@ -1513,25 +1619,25 @@ impl CodeGen for decaf::Expr {
                 }
 			}
 			BinLogical(expr) => {
-                 match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
-                     (Value(val_lhs), Value(val_rhs)) => {
+                 match ((&*expr.lhs).gencode(generator)?, (&*expr.rhs).gencode(generator)?) {
+                     (CodeValue::Value(val_lhs), CodeValue::Value(val_rhs)) => {
                          use crate::lnp::past::BinOp::*;
                          unsafe {
                              match expr.op {
                                  LogicalAndOp => {
-                                     Value(Val(val_lhs.get_type(),
-                                               LLVMBuildAnd(generator.builder,
-                                                            val_lhs.get_value(generator),
-                                                            val_rhs.get_value(generator),
-                                                            generator.next_and_name())))
+                                     Ok(CodeValue::Value(Val(val_lhs.get_type(),
+                                                  LLVMBuildAnd(generator.builder,
+                                                               val_lhs.get_value(generator),
+                                                               val_rhs.get_value(generator),
+                                                               generator.next_name("and")))))
                                  }
                                  LogicalOrOp => {
                                      // TODO: c-type or
-                                     Value(Val(val_lhs.get_type(),
-                                               LLVMBuildOr(generator.builder,
-                                                           val_lhs.get_value(generator),
-                                                           val_rhs.get_value(generator),
-                                                           generator.next_or_name())))
+                                     Ok(CodeValue::Value(Val(val_lhs.get_type(),
+                                                  LLVMBuildOr(generator.builder,
+                                                              val_lhs.get_value(generator),
+                                                              val_rhs.get_value(generator),
+                                                              generator.next_name("or")))))
                                  }
                                  _ => Err(ENonLogicalOp(format!("{:?}", expr.op)))
                              }
@@ -1541,35 +1647,77 @@ impl CodeGen for decaf::Expr {
                  }
 			}
 			UnNot(expr) => {
-                match expr.gencode(generator)? {
-                    Value(val) => {
+                match (&*expr.rhs).gencode(generator)? {
+                    CodeValue::Value(val) => {
                         unsafe {
-                            Value(Val(val.get_type(),
-                                      LLVMBuildNot(generator.builder,
-                                                   val.get_value(generator),
-                                                   generator.next_not_name())))
+                            Ok(CodeValue::Value(Val(val.get_type(),
+                                         LLVMBuildNot(generator.builder,
+                                                      val.get_value(generator),
+                                                      generator.next_name("not")))))
                         }
                     }
                     _ => Err(EValueNotFound(format!("{:?}", expr)))
                 }
 			}
 			BinCmp(expr) => {
-                match (expr.lhs.gencode(generator)?, expr.rhs.gencode(generator)?) {
-                    (Value(val_lhs), Value(val_rhs)) => {
+                match ((&*expr.lhs).gencode(generator)?, (&*expr.rhs).gencode(generator)?) {
+                    (CodeValue::Value(val_lhs), CodeValue::Value(val_rhs)) => {
                         use crate::lnp::past::BinOp::*;
                         unsafe {
                             match expr.op {
                                 GreaterThanOp => {
+                                    Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntSGT,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("gt")))))
                                 }
                                 GreaterOrEqOp => {
+                                    Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntSGE,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("ge")))))
                                 }
                                 LessThanOp => {
+									Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntSLT,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("lt")))))
                                 }
                                 LessOrEqOp => {
+                                    Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntSLE,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("le")))))
                                 }
                                 EqualsOp => {
+                                    Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntEQ,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("eq")))))
                                 }
                                 NotEqualsOp => {
+                                    Ok(CodeValue::Value(Val(
+										decaf_bool_type!(),
+										LLVMBuildICmp(generator.builder,
+													  LLVMIntNE,
+													  val_lhs.get_value(generator),
+													  val_rhs.get_value(generator),
+													  generator.next_name("ne")))))
                                 }
                                 _ => Err(ENonCmpOp(format!("{:?}", expr.op)))
                             }
@@ -1579,29 +1727,705 @@ impl CodeGen for decaf::Expr {
                 }
 			}
 			CreateArray(expr) => {
+                if expr.dims.len() > 0 {
+                    match generator.get_top_most_function_val() {
+                        Some(func_val) => {
+                            struct LoopInfo {
+                                init_bb: Option<LLVMBasicBlockRef>,
+                                cond_bb: Option<LLVMBasicBlockRef>,
+                                body_bb: LLVMBasicBlockRef,
+                                finish_bb: LLVMBasicBlockRef,
+                                control_var: Option<LLVMValueRef>,
+                                array_ty: LLVMTypeRef,
+                                array_var: LLVMValueRef,
+                                array_inner_val: LLVMValueRef,
+                                rep_count: LLVMValueRef,
+                            }
+
+                            // Dynamically construct nested array
+                            let mut dim_vals = vec![];
+                            let mut loop_infos = vec![];
+                            let mut array_result = std::ptr::null_mut();
+
+                            let mut lvl = expr.dims.len() as u32;
+                            for dim in expr.dims.iter() {
+                                match dim.gencode(generator)? {
+                                    CodeValue::Value(dim_val) => {
+                                        dim_vals.push(dim_val)
+                                    }
+                                    _ => {
+                                        return Err(EValueNotFound(format!("{:?}", dim)));
+                                    }
+                                }
+                            }
+
+                            unsafe {
+                                for (ix, dim_val) in dim_vals.iter().enumerate() {
+                                    if ix == 0 {
+                                        // body0
+                                        let next_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_next")
+                                        );
+                                        let body_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_body")
+                                        );
+                                        let ty = generator.get_llvm_type_from_decaf_type(
+                                            &decaf::Type {
+                                                base: expr.ty.clone(),
+                                                array_lvl: lvl
+                                            },
+                                            false
+                                        );
+                                        let ty_inner = generator.get_llvm_type_from_decaf_type(
+                                            &decaf::Type {
+                                                base: expr.ty.clone(),
+                                                array_lvl: lvl - 1,
+                                            },
+                                            false
+                                        );
+
+                                        LLVMBuildBr(generator.builder, body_bb);
+                                        LLVMPositionBuilderAtEnd(generator.builder, body_bb);
+                                        let dim_llvm_val = dim_val.get_value(generator);
+                                        let array_var = LLVMBuildMalloc(
+                                            generator.builder,
+                                            ty.unwrap(),
+                                            generator.next_name("aloop_array_struct")
+                                        );
+                                        let array_inner_val = LLVMBuildArrayMalloc(
+                                            generator.builder,
+                                            ty_inner.unwrap(),
+                                            dim_llvm_val,
+                                            generator.next_name("aloop_array_inner")
+                                        );
+                                        let inner_addr = LLVMBuildGEP(
+                                            generator.builder,
+                                            array_var,
+                                            indices!(0, 0),
+                                            2,
+                                            generator.next_name("aloop_gep_array_inner_addr")
+                                        );
+                                        let sz_addr = LLVMBuildGEP(
+                                            generator.builder,
+                                            array_var,
+                                            indices!(0, 1),
+                                            2,
+                                            generator.next_name("aloop_gep_array_sz_addr")
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            array_inner_val,
+                                            inner_addr
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            dim_llvm_val,
+                                            sz_addr,
+                                        );
+
+                                        let info = LoopInfo {
+                                            init_bb: None,
+                                            cond_bb: None,
+                                            body_bb,
+                                            finish_bb: next_bb,
+                                            control_var: None,
+                                            array_ty: ty.unwrap(),
+                                            array_var,
+                                            array_inner_val,
+                                            rep_count: dim_llvm_val,
+                                        };
+                                        loop_infos.push(info);
+                                        array_result = array_var;
+                                    }
+                                    else {
+                                        let init_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_init")
+                                        );
+                                        let cond_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_cond")
+                                        );
+                                        let body_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_body")
+                                        );
+                                        let finish_bb = LLVMAppendBasicBlockInContext(
+                                            generator.ctx,
+                                            func_val,
+                                            generator.next_name("aloop_finish")
+                                        );
+                                        let ty = generator.get_llvm_type_from_decaf_type(
+                                            &decaf::Type {
+                                                base: expr.ty.clone(),
+                                                array_lvl: lvl - ix as u32
+                                            },
+                                            false
+                                        );
+                                        let inner_ty = generator.get_llvm_type_from_decaf_type(
+                                            &decaf::Type {
+                                                base: expr.ty.clone(),
+                                                array_lvl: lvl - ix as u32 - 1,
+                                            },
+                                            false
+                                        );
+
+                                        LLVMBuildBr(generator.builder, init_bb);
+                                        LLVMPositionBuilderAtEnd(generator.builder, init_bb);
+                                        let control_var = LLVMBuildAlloca(
+                                            generator.builder,
+                                            int_type!(),
+                                            generator.next_name("aloop_control_var")
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            const_i64!(0),
+                                            control_var
+                                        );
+                                        LLVMBuildBr(generator.builder, cond_bb);
+                                        LLVMPositionBuilderAtEnd(generator.builder, cond_bb);
+                                        let control_var_val = LLVMBuildLoad(
+                                            generator.builder,
+                                            control_var,
+                                            generator.next_name("aloop_load_control_var")
+                                        );
+                                        let cmp_result = LLVMBuildICmp(
+                                            generator.builder,
+                                            LLVMIntSLT,
+                                            control_var_val,
+                                            loop_infos.last().unwrap().rep_count,
+                                            generator.next_name("aloop_cmp_control_var")
+                                        );
+                                        LLVMBuildCondBr(
+                                            generator.builder,
+                                            cmp_result,
+                                            body_bb,
+                                            loop_infos.last().unwrap().finish_bb
+                                        );
+
+                                        LLVMPositionBuilderAtEnd(generator.builder, finish_bb);
+                                        let next_control_val = LLVMBuildAdd(
+                                            generator.builder,
+                                            control_var_val,
+                                            const_i64!(1),
+                                            generator.next_name("aloop_inc_control_var"),
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            next_control_val,
+                                            control_var
+                                        );
+                                        LLVMBuildBr(generator.builder, cond_bb);
+
+                                        LLVMPositionBuilderAtEnd(generator.builder, body_bb);
+                                        let dim_llvm_val = dim_val.get_value(generator);
+                                        let array_var = LLVMBuildMalloc(
+                                            generator.builder,
+                                            ty.unwrap(),
+                                            generator.next_name("aloop_array_struct")
+                                        );
+                                        let array_inner_val = LLVMBuildArrayMalloc(
+                                            generator.builder,
+                                            inner_ty.unwrap(),
+                                            dim_llvm_val,
+                                            generator.next_name("aloop_array_inner")
+                                        );
+                                        let inner_addr = LLVMBuildGEP(
+                                            generator.builder,
+                                            array_var,
+                                            indices!(0, 0),
+                                            2,
+                                            generator.next_name("aloop_gep_array_inner_addr")
+                                        );
+                                        let sz_addr = LLVMBuildGEP(
+                                            generator.builder,
+                                            array_var,
+                                            indices!(0, 1),
+                                            2,
+                                            generator.next_name("aloop_gep_array_sz_addr")
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            array_inner_val,
+                                            inner_addr,
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            dim_llvm_val,
+                                            sz_addr,
+                                        );
+
+                                        let element_addr = LLVMBuildGEP(
+                                            generator.builder,
+                                            loop_infos.last().unwrap().array_inner_val,
+                                            params!(control_var_val),
+                                            1,
+                                            generator.next_name("aloop_gep_array_elem_addr")
+                                        );
+                                        LLVMBuildStore(
+                                            generator.builder,
+                                            array_var,
+                                            element_addr
+                                        );
+
+                                        if ix as u32 == lvl - 1 { // last layer
+                                            LLVMBuildBr(generator.builder, finish_bb);
+                                        }
+                                        loop_infos.push(LoopInfo {
+                                            init_bb: Some(init_bb),
+                                            cond_bb: Some(cond_bb),
+                                            body_bb,
+                                            finish_bb,
+                                            control_var: Some(control_var),
+                                            array_ty: ty.unwrap(),
+                                            array_var,
+                                            array_inner_val,
+                                            rep_count: dim_llvm_val
+                                        });
+                                    }
+                                }
+                            }
+
+                            Ok(CodeValue::Value(Val(
+                                decaf::Type {
+                                    base: expr.ty.clone(),
+                                    array_lvl: expr.dims.len() as u32
+                                },
+                                array_result)))
+                        }
+                        None => Err(EBlockNotInFunction(format!("{:?}", expr)))
+                    }
+                } else {
+                    Err(EArrayZeroDim(format!("{:?}", expr)))
+                }
 			}
 			Literal(expr) => {
+                match expr {
+                    IntLiteral(i) => {
+                        Ok(CodeValue::Value(Val(decaf::Type {
+                            base: IntTy,
+                            array_lvl: 0,
+                        }, const_i64!(*i))))
+                    }
+                    BoolLiteral(b) => {
+                        Ok(CodeValue::Value(Val(decaf::Type {
+                            base: BoolTy,
+                            array_lvl: 0,
+                        }, const_bool!(*b))))
+                    }
+                    CharLiteral(c) => {
+                        Ok(CodeValue::Value(Val(decaf::Type {
+                            base: CharTy,
+                            array_lvl: 0,
+                        }, const_char!(*c))))
+                    }
+                    StrLiteral(s) => {
+                        panic!("StrLiteral should not not be accessed")
+                    }
+                }
 			}
 			This(expr) => {
+                match generator.variable_lookup("this") {
+                    Some(var) => {
+                        Ok(CodeValue::Value(Addr(var)))
+                    }
+                    None => Err(EThisNotFound)
+                }
 			}
 			CreateObj(expr) => {
+                use decaf::LiteralExpr::*;
+                // Specical case for String
+                match expr.cls.name == "String" {
+                    true => {
+                        if expr.args.len() == 1 {
+                            match &expr.args[0] {
+                                Literal(StrLiteral(s)) => {
+                                   Ok(CodeValue::Value(Val(decaf::Type {
+                                           base: ClassTy(generator.class_lookup("String").unwrap()),
+                                           array_lvl: 0
+                                       },
+                                       generator.new_string_class(s)
+                                   )))
+                                }
+                                _ => Err(EInvalidStringCreation(format!("{:?}", expr)))
+                            }
+                        } else {
+                            Err(EInvalidStringCreation(format!("{:?}", expr)))
+                        }
+                    }
+                    false => {
+                        match generator.get_function_by_name(&expr.ctor.as_ref().unwrap().llvm_name()) {
+                            Some(ctor_func_val) => {
+
+                                let cls_ty = decaf::Type {
+                                    base: ClassTy(expr.cls.clone()),
+                                    array_lvl: 0,
+                                };
+
+                                // Allocate first
+                                let this;
+                                unsafe {
+                                    this = LLVMBuildMalloc(
+                                        generator.builder,
+                                        generator.get_llvm_type_by_name(&expr.cls.name, false).unwrap(),
+                                        generator.next_name(&format!("new_{}", &expr.cls.name))
+                                    );
+                                    // Store virtual table pointer
+                                    let virtual_table_val = generator.get_global_by_name(&expr.cls.name).unwrap();
+                                    let virtual_table_addr = LLVMBuildGEP(
+                                        generator.builder,
+                                        this,
+                                        indices!(0, 0),
+                                        2,
+                                        generator.next_name(&format!("get_vtable_addr_{}", &expr.cls.name))
+                                    );
+                                    LLVMBuildStore(
+                                        generator.builder,
+                                        virtual_table_val,
+                                        virtual_table_addr
+                                    );
+
+                                    // TODO zero all the fields
+                                }
+
+                                let mut arg_vals = vec![this];
+                                for (ix, arg) in expr.args.iter().enumerate() {
+                                    match arg.gencode(generator)? {
+                                        CodeValue::Value(arg_val) => {
+                                            // Type casting
+                                            let arg_llvm_val = arg_val.get_value(generator);
+                                            let casted_val = generator.cast_value(&arg_val.get_type(),  // source type
+                                                                                  &expr.ctor.as_ref().unwrap().args.borrow()[ix].1.as_ref(), // destination type
+                                                                                  arg_llvm_val // source value
+                                            );
+
+                                            arg_vals.push(casted_val);
+                                        }
+                                        _ => {
+                                            return Err(EValueNotFound(format!("{:?}", arg)));
+                                        }
+                                    }
+                                }
+                                unsafe {
+                                    Ok(CodeValue::Value(Val(
+                                        decaf::Type {
+                                            base: ClassTy(expr.cls.clone()),
+                                            array_lvl: 0,
+                                        },
+                                        LLVMBuildCall(
+                                            generator.builder,
+                                            ctor_func_val,
+                                            arg_vals.as_slice().as_ptr() as *mut _,
+                                            arg_vals.len() as u32,
+                                            generator.next_name(&format!("ctor_{}", &expr.cls.name)),
+                                    ))))
+                                }
+                            }
+                            None => Err(EFunctionNotFound(expr.ctor.as_ref().unwrap().llvm_name()))
+                        }
+                    }
+                }
 			}
 			MethodCall(expr) => {
+                use decaf::Expr::*;
+                use decaf::Visibility::*;
+                // Check if this is a static call or a private method call
+                // If so, look up function by name
+                let isfinal =
+                    match &*expr.var {
+                        ClassId(_) => true,
+                        _ => false,
+                    } || *expr.method.stat.borrow()
+                        || match &*expr.method.vis.borrow() {
+                        Pub | Prot => false,
+                        Priv => true,
+                    };
+
+                let (func_val, mut arg_vals) = {
+                    if isfinal {
+                        match expr.var.gencode(generator)? { // Private method call
+                            CodeValue::Value(val) => {
+                                match generator.get_function_by_name(&expr.method.llvm_name()) {
+                                    Some(func_val) => {
+                                        // Assume type checks done
+                                        let this = val.get_value(generator);
+                                        let mut arg_vals = vec![this];
+                                         (func_val, arg_vals)
+                                    }
+                                    None => {
+                                        return Err(EFunctionNotFound(expr.method.llvm_name()));
+                                    }
+                                }
+                            }
+                            Type(ty, llvm_ty) => { // Static call
+                                match generator.get_function_by_name(&expr.method.llvm_name()) {
+                                    Some(func_val) => {
+                                        (func_val, vec![])
+                                    }
+                                    None => {
+                                        return Err(EFunctionNotFound(expr.method.llvm_name()));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(EValueNotFound(format!("{:?}", expr.var)));
+                            }
+                        }
+                    }
+                    else {
+                        match expr.var.gencode(generator)? { // Pub/Prot function call
+                            CodeValue::Value(val) => {
+                                let cls = {
+                                    let val_type = val.get_type();
+                                    if let ClassTy(c) = &val_type.base {
+                                        if val_type.array_lvl == 0 {
+                                            c.clone()
+                                        } else {
+                                            return Err(EArrayNotSupportMethodCall(format!("{:?}", val_type)));
+                                        }
+                                    } else {
+                                        return Err(ENonClassNotSupportMethodCall(format!("{:?}", val_type)));
+                                    }
+                                };
+
+                                unsafe {
+                                    let this_ref = val.get_value(generator);
+                                    let virtual_table_global = generator.get_global_by_name(&cls.name).unwrap();
+                                    let virtual_table_ty = LLVMTypeOf(virtual_table_global);
+                                    let func_val = generator.get_function_by_name(&expr.method.llvm_name()).unwrap();
+                                    let func_ty = LLVMTypeOf(func_val);
+                                    let func_idx = match cls.vtable.borrow().indexof(&expr.method) {
+                                        Some(ix) => ix,
+                                        None => {
+                                            return Err(EMethodNotFoundInVTable(format!("{:?}", expr.method)))
+                                        }
+                                    };
+                                    let virtual_table_ptr_addr = LLVMBuildGEP(
+                                        generator.builder,
+                                        this_ref,
+                                        indices!(0, 0),
+                                        2,
+                                        generator.next_name(&format!("get_vtable_ptr_addr_{}", &cls.name))
+                                    );
+                                    let virtual_table_ptr = LLVMBuildLoad2(
+                                        generator.builder,
+                                        virtual_table_ty,
+                                        virtual_table_ptr_addr,
+                                        generator.next_name(&format!("load_vtable_ptr_{}", &cls.name))
+                                    );
+                                    let func_addr = LLVMBuildGEP(
+                                        generator.builder,
+                                        virtual_table_ptr,
+                                        indices!(0, func_idx),
+                                        2,
+                                        generator.next_name(&format!("get_func_addr_{}", &cls.name))
+                                    );
+                                    let func_val = LLVMBuildLoad2(
+                                        generator.builder,
+                                        func_ty,
+                                        func_addr,
+                                        generator.next_name(&format!("load_func_val_{}", &cls.name))
+                                    );
+
+                                    (func_val, vec![this_ref])
+                                }
+                            }
+                            _ => {
+                                return Err(EValueNotFound(format!("{:?}", expr.var)));
+                            }
+                        }
+                    }
+                };
+                for (ix, arg) in expr.args.iter().enumerate() {
+                    match arg.gencode(generator)? {
+                        CodeValue::Value(arg_val) => {
+                            // Type casting
+                            let arg_llvm_val = arg_val.get_value(generator);
+                            let casted_val = generator.cast_value(&arg_val.get_type(),  // source type
+                                                                  &expr.method.args.borrow()[ix].1.as_ref(), // destination type
+                                                                  arg_llvm_val // source value
+                            );
+                            arg_vals.push(casted_val);
+                        }
+                        _ => {
+                            return Err(EValueNotFound(format!("{:?}", arg)));
+                        }
+                    }
+                }
+
+                unsafe {
+                    Ok(CodeValue::Value(Val(
+                        decaf::Type {
+                            base: expr.method.return_ty.borrow().base.clone(),
+                            array_lvl: expr.method.return_ty.borrow().array_lvl
+                        },
+                        LLVMBuildCall(
+                            generator.builder,
+                            func_val,
+                            arg_vals.as_slice().as_ptr() as *mut _,
+                            arg_vals.len() as u32,
+                            generator.next_name(&format!("function_call_{}", expr.method.llvm_name())),
+                        )
+                    )))
+                }
 			}
 			SuperCall(expr) => {
+                // Assuming type checks done
+                let this_ref = generator.variable_lookup("this").unwrap();
+                let func_val = generator.get_function_by_name(&expr.method.llvm_name()).unwrap();
+                let mut arg_vals = vec![this_ref.addr.borrow().clone().unwrap()];
+                for (ix, arg) in expr.args.iter().enumerate() {
+                    match arg.gencode(generator)? {
+                        CodeValue::Value(arg_val) => {
+                            // Type casting
+                            let arg_llvm_val = arg_val.get_value(generator);
+                            let casted_val = generator.cast_value(&arg_val.get_type(),  // source type
+                                                                  &expr.method.args.borrow()[ix].1.as_ref(), // destination type
+                                                                  arg_llvm_val // source value
+                            );
+                            arg_vals.push(casted_val);
+                        }
+                        _ => {
+                            return Err(EValueNotFound(format!("{:?}", arg)));
+                        }
+                    }
+                }
+                unsafe {
+                    Ok(CodeValue::Value(Val(
+                        decaf::Type {
+                            base: expr.method.return_ty.borrow().base.clone(),
+                            array_lvl: expr.method.return_ty.borrow().array_lvl
+                        },
+                        LLVMBuildCall(
+                            generator.builder,
+                            func_val,
+                            arg_vals.as_slice().as_ptr() as *mut _,
+                            arg_vals.len() as u32,
+                            generator.next_name(&format!("function_call_{}", expr.method.llvm_name())),
+                        )
+                    )))
+                }
 			}
 			ArrayAccess(expr) => {
+                // TODO: bound check
+                match (expr.var.gencode(generator)?, expr.idx.gencode(generator)?) {
+                    (CodeValue::Value(array_val), CodeValue::Value(idx_val)) => {
+                        let array_ty = array_val.get_type();
+                        let array_llvm_val = array_val.get_value(generator);
+                        let idx_llvm_val = idx_val.get_value(generator);
+                        // Get pointer
+                        unsafe {
+                            let array_inner_addr = LLVMBuildGEP(
+                                generator.builder,
+                                array_llvm_val,
+                                indices!(0, 0),
+                                2,
+                                generator.next_name("gep_array_inner_addr")
+                            );
+                            let array_inner = LLVMBuildLoad(
+                                generator.builder,
+                                array_inner_addr,
+                                generator.next_name("load_array_inner")
+                            );
+                            let val_addr = LLVMBuildGEP(
+                                generator.builder,
+                                array_inner,
+                                params!(idx_llvm_val),
+                                1,
+                                generator.next_name("gep_array_element_addr")
+                            );
+                            let val = LLVMBuildLoad(
+                                generator.builder,
+                                val_addr,
+                                generator.next_name("load_array_element")
+                            );
+
+                            Ok(CodeValue::Value(Val(
+                                decaf::Type {
+                                    base: array_ty.base.clone(),
+                                    array_lvl: array_ty.array_lvl - 1
+                                },
+                                val
+                            )))
+                        }
+                    }
+                    (CodeValue::Value(_), _) => Err(EValueNotFound(format!("{:?}", expr.idx))),
+                    (_, CodeValue::Value(_)) => Err(EValueNotFound(format!("{:?}", expr.var))),
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
 			}
 			FieldAccess(expr) => {
+                // TODO: class check
+                match expr.var.gencode(generator)? {
+                    CodeValue::Value(var_val) => {
+                        let obj_val = var_val.get_value(generator);
+                        let obj_ty = var_val.get_type();
+                        if obj_ty.array_lvl == 0 {
+                            if let ClassTy(cls) = obj_ty.base {
+                                let field_idx = cls.get_field_index(&expr.fld).unwrap();
+                                let field_ty = generator.get_llvm_type_from_decaf_type(
+                                    &*expr.fld.ty.borrow(), false).unwrap();
+                                unsafe {
+                                    let field_addr = LLVMBuildGEP(
+                                        generator.builder,
+                                        obj_val,
+                                        indices!(0, field_idx),
+                                        2,
+                                        generator.next_name(&format!("gep_field_addr_{}_{}", cls.name, expr.fld.name))
+                                    );
+                                    Ok(CodeValue::Value(Val(decaf::Type {
+                                        base: expr.fld.ty.borrow().base.clone(),
+                                        array_lvl: expr.fld.ty.borrow().array_lvl
+                                    },
+                                                            LLVMBuildLoad2(
+                                                                generator.builder,
+                                                                field_ty,
+                                                                field_addr,
+                                                                generator.next_name(&format!("load_field_{}_{}", cls.name, expr.fld.name))
+                                                            )
+                                    )))
+                                }
+                            } else {
+                                Err(ENonClassNotSupportMethodCall(format!("{:?}", expr.var)))
+                            }
+                        } else {
+                            Err(EArrayNotSupportMethodCall(format!("{:?}", expr.var)))
+                        }
+                    }
+                    _ => Err(EValueNotFound(format!("{:?}", expr)))
+                }
 			}
-			Variable(expr) => {
+			decaf::Expr::Variable(expr) => {
+                Ok(CodeValue::Value(Addr(expr.var.clone())))
 			}
 			ClassId(expr) => {
+                Ok(Type(
+                    decaf::Type {
+                        base: ClassTy(expr.cls.clone()),
+                        array_lvl: 0
+                    },
+                    generator.get_llvm_type_by_name(&expr.cls.name, false).unwrap()
+                ))
 			}
 			NULL => {
+                unsafe {
+                    Ok(CodeValue::Value(Val(
+                        decaf::Type {
+                            base: NULLTy,
+                            array_lvl: 0
+                        },
+                        LLVMConstPointerNull(int_type!())
+                    )))
+                }
 			}
         }
-		Err(ENotImplemented)
 	}
 }
 

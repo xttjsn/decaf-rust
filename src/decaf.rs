@@ -164,6 +164,7 @@ pub struct Method {
 	pub return_ty: RefCell<Rc<Type>>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 	pub body: RefCell<Option<Rc<BlockStmt>>>,
+	pub vartbl: RefCell<Vec<Rc<Variable>>>,
 }
 
 impl Method {
@@ -181,6 +182,7 @@ impl Method {
 			return_ty: RefCell::new(unknowncls.clone()),
 			args: RefCell::new(vec![]),
 			body: RefCell::new(None),
+			vartbl: RefCell::new(vec![]),
 		}
 	}
 
@@ -235,6 +237,7 @@ pub struct Ctor {
 	pub vis: RefCell<Visibility>,
 	pub args: RefCell<Vec<(String, Rc<Type>)>>,
 	pub body: RefCell<Option<Rc<BlockStmt>>>,
+	pub vartbl: RefCell<Vec<Rc<Variable>>>,
 }
 
 impl Ctor {
@@ -244,6 +247,7 @@ impl Ctor {
 			vis: RefCell::new(Visibility::Pub),
 			args: RefCell::new(vec![]),
 			body: RefCell::new(None),
+			vartbl: RefCell::new(vec![]),
 		}
 	}
 
@@ -305,6 +309,34 @@ pub struct Variable {
 	pub ty: Type,
 	pub addr: RefCell<Option<LLVMValueRef>>,
 	pub refcount: RefCell<u32>,  // Simply a count of how many times the variable is loaded
+}
+
+impl Variable {
+	pub fn next_refcount(&self) -> u32 {
+		*self.refcount.borrow_mut() += 1;
+		*self.refcount.borrow()
+	}
+}
+
+pub trait VariableTable {
+	fn set_addr_for_name(&mut self, name: &str, addr: LLVMValueRef);
+}
+
+impl VariableTable for Vec<Rc<Variable>> {
+	fn set_addr_for_name(&mut self, name: &str, addr: LLVMValueRef) {
+		for (ix, var) in self.iter().enumerate() {
+			if var.name == name {
+				*self[ix].addr.borrow_mut() = Some(addr);
+				return;
+			}
+		}
+		println!("{} not found in variable table", name);
+	}
+}
+
+
+pub struct UnamedVariable {  // e.g. field, array access
+
 }
 
 impl Value for Variable {
@@ -400,6 +432,9 @@ pub struct ExprStmt {
 pub struct WhileStmt {
 	pub condexpr: Expr,
 	pub bodyblock: RefCell<Option<Rc<BlockStmt>>>,
+	pub condbb: RefCell<Option<LLVMBasicBlockRef>>,
+	pub bodybb: RefCell<Option<LLVMBasicBlockRef>>,
+	pub nextbb: RefCell<Option<LLVMBasicBlockRef>>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -646,7 +681,23 @@ impl Scope {
 		use Scope::*;
 		match self {
 			// TODO: implement fields
-			ClassScope(_) | CtorScope(_) | MethodScope(_) | WhileScope(_) | GlobalScope => None,
+			ClassScope(_) | WhileScope(_) | GlobalScope => None,
+			MethodScope(mthd) => {
+				for v in mthd.vartbl.borrow().iter() {
+					if v.name == name {
+						return Some(v.clone());
+					}
+				}
+				None
+			}
+			CtorScope(ctor) => {
+				for v in ctor.vartbl.borrow().iter() {
+					if v.name == name {
+						return Some(v.clone());
+					}
+				}
+				None
+			}
 			BlockScope(blk) => {
 				for v in blk.vartbl.borrow().iter() {
 					if v.name == name {
@@ -661,8 +712,32 @@ impl Scope {
 	pub fn variable_add(&self, name: String, ty: Type) {
 		use Scope::*;
 		match self {
-			ClassScope(_) | CtorScope(_) | MethodScope(_) | WhileScope(_) | GlobalScope =>
+			ClassScope(_) | WhileScope(_) | GlobalScope =>
 				panic!("variable_add is supported only for block scope"),
+			MethodScope(method) => {
+				if method.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
+					panic!("variable {:?} is already defined", name)
+				}
+				let var = Rc::new(Variable {
+					name,
+					ty,
+					addr: RefCell::new(None),
+					refcount: RefCell::new(0),
+				});
+				method.vartbl.borrow_mut().push(var);
+			}
+			CtorScope(ctor) => {
+				if ctor.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
+					panic!("variable {:?} is already defined", name)
+				}
+				let var = Rc::new(Variable {
+					name,
+					ty,
+					addr: RefCell::new(None),
+					refcount: RefCell::new(0),
+				});
+				ctor.vartbl.borrow_mut().push(var);
+			}
 			BlockScope(blk) => {
 				if blk.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
 					panic!("variable {:?} is already defined", name)
@@ -670,7 +745,7 @@ impl Scope {
 				let var = Rc::new(Variable {
 					name,
 					ty,
-					addr: RefCell:new(None),
+					addr: RefCell::new(None),
 					refcount: RefCell::new(0),
 				});
 				blk.vartbl.borrow_mut().push(var);
@@ -737,6 +812,7 @@ where
 
 pub trait VTable {
 	fn add_vmethod(&mut self, method: &Rc<Method>);
+	fn indexof(&self, method: &Rc<Method>) -> Option<u32>;
 }
 
 impl VTable for Vec<Rc<Method>> {
@@ -750,7 +826,13 @@ impl VTable for Vec<Rc<Method>> {
 				self.push(method.clone());
 			}
 		}
+	}
 
+	fn indexof(&self, method: &Rc<Method>) -> Option<u32> {
+		match self.iter().position(|m| m.has_same_signature(method)) {
+			Some(ix) => Some(ix as u32),
+			None => None
+		}
 	}
 }
 
@@ -866,6 +948,38 @@ impl Class {
 		}
 
 		None
+	}
+
+	pub fn get_field_index(&self, field: &Rc<Field>) -> Option<u32> {
+		let mut base = 0;
+		match self.pub_fields.borrow().iter().position(|f| {
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+		}) {
+			Some(ix) => {
+				return Some(ix as u32 + base);
+			}
+			None => {
+				base += self.pub_fields.borrow().len() as u32;
+			}
+		};
+
+		match self.prot_fields.borrow().iter().position(|f| {
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+		}) {
+			Some(ix) => {
+				return Some(ix as u32 + base);
+			}
+			None => {
+				base += self.prot_fields.borrow().len() as u32;
+			}
+		};
+
+		match self.prot_fields.borrow().iter().position(|f| {
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+		}) {
+			Some(ix) => Some(ix as u32 + base),
+			None => None
+		}
 	}
 
 	pub fn get_method_by_signature(&self, return_ty: &TypeBase, array_lvl: u32,

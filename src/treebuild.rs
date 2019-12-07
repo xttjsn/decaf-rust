@@ -1,12 +1,21 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::decaf;
-use crate::decaf::{Returnable, Value, VTable};
-use crate::decaf::Scope::WhileScope;
+use crate::decaf::{Returnable, Value, VTable, Scope::*, Expr::*, AssignExpr, BinArithExpr,
+				   UnArithExpr, BinLogicalExpr, UnNotExpr, BinCmpExpr, CreateArrayExpr,
+				   LiteralExpr, ThisExpr, CreateObjExpr, MethodCallExpr, SuperCallExpr,
+				   ArrayAccessExpr, FieldAccessExpr, VariableExpr, ClassIdExpr, Type, TypeBase::*,
+				   Visibility::*, LiteralExpr::*, Stmt::*};
+
+use SemanticError::*;
+use BuilderState::*;
+use BuilderResult::*;
+
 use crate::lnp;
-use crate::lnp::lexer::Token::IntLit;
+use lnp::past::{Modifier::*, Litr::*, NNAExpr::*, AExpr::*, FExpr::*, NAExpr::*, Prim::*,
+				PrimitiveType::*, Stmt::*, Expr::*, BinOp::*, UnOp::*};
 
 macro_rules! debug {
 	() => (println!());
@@ -140,6 +149,7 @@ pub enum SemanticError {
 	EUnknownIdentifier,
 	EMissingReturn,
 	EUninitializedArray,
+	ENotInClassScope,
 }
 
 trait Normalize {
@@ -482,11 +492,11 @@ impl ASTBuilder for DecafTreeBuilder {
 		use crate::decaf::Scope::*;
 		// The top most scope must be a block scope
 		match self.scopes.last() {
-			Some(BlockScope(_)) => {
+			Some(BlockScope(_)) | Some(CtorScope(_)) | Some(MethodScope(_)) => {
 				self.scopes.last().unwrap().variable_add(name, ty);
 			}
 			_ => {
-				panic!("top most scope must be a block scope when adding variable");
+				panic!("top most scope must be a block/ctor/method scope when adding variable");
 			}
 		}
 	}
@@ -659,7 +669,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_class(&mut self, cls_node: &lnp::past::ClassNode) -> Self::Result {
-		use SemanticError::*;
 		match self.state {
 			BuilderState::First => {
 				// Check for class name conflicts
@@ -744,6 +753,26 @@ impl Visitor for DecafTreeBuilder {
 				if let Some(cls) = self.class_lookup(cls_node.name.clone()) {
 					self.scopes.push(ClassScope(cls.clone()));
 
+					// Add all fields as variable
+					for field in cls.pub_fields.borrow().iter() {
+						self.variable_add(field.name.clone(), decaf::Type {
+							base: field.ty.borrow().base.clone(),
+							array_lvl: field.ty.borrow().array_lvl
+						});
+					}
+					for field in cls.prot_fields.borrow().iter() {
+						self.variable_add(field.name.clone(), decaf::Type {
+							base: field.ty.borrow().base.clone(),
+							array_lvl: field.ty.borrow().array_lvl
+						});
+					}
+					for field in cls.priv_fields.borrow().iter() {
+						self.variable_add(field.name.clone(), decaf::Type {
+							base: field.ty.borrow().base.clone(),
+							array_lvl: field.ty.borrow().array_lvl
+						});
+					}
+
 					for member in cls_node.member_list.iter() {
 						match member {
 							lnp::past::Member::FieldMember(field) => field.accept(self)?,
@@ -764,13 +793,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_field(&mut self, field_node: &lnp::past::Field) -> Self::Result {
-		use SemanticError::*;
-		use crate::decaf::Type;
-		use self::BuilderState::*;
-		use self::BuilderResult::*;
-		use crate::decaf::TypeBase::*;
-		use lnp::past::Modifier::*;
-
 		match &self.state {
 			First => {
 				// Normalize field
@@ -856,14 +878,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_method(&mut self, mthd: &lnp::past::Method) -> Self::Result {
-		use SemanticError::*;
-		use self::BuilderState::*;
-		use self::BuilderResult::*;
-		use crate::decaf::Type;
-		use crate::decaf::TypeBase::*;
-		use lnp::past::Modifier::*;
-		use crate::decaf::Visibility::*;
-		use crate::decaf::Scope::*;
 		match self.state {
 			First => {
 				// Normalize method
@@ -1039,6 +1053,15 @@ impl Visitor for DecafTreeBuilder {
 				// Push new scope
 				self.scopes.push(MethodScope(method.clone()));
 
+				// Add argument as variable
+				for (arg_name, arg_ty_base, arg_array_lvl) in args.iter() {
+					let arg_ty = decaf::Type {
+						base: arg_ty_base.clone(),
+						array_lvl: *arg_array_lvl
+					};
+					self.variable_add(arg_name.clone(), arg_ty);
+				}
+
 				// Visit block
 				debug!("trying to visit block");
 				let ret = match mthd.block.accept(self) {
@@ -1081,14 +1104,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_expr(&mut self, expr: &lnp::past::Expression) -> Self::Result {
-		use SemanticError::*;
-		use self::BuilderResult::*;
-		use lnp::past::Expr::*;
-		use lnp::past::BinOp::*;
-		use lnp::past::UnOp::*;
-		use crate::decaf::{AssignExpr, BinArithExpr, BinLogicalExpr, BinCmpExpr, UnArithExpr,
-						   UnNotExpr};
-		use crate::decaf::Expr::*;
 		match &expr.expr {
 			BinaryExpr(left_expr, binop, right_expr) => {
 				match (right_expr.accept(self), left_expr.accept(self)) {
@@ -1203,14 +1218,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_ctor(&mut self, ctor: &lnp::past::Ctor) -> Self::Result {
-		use SemanticError::*;
-		use self::BuilderState::*;
-		use self::BuilderResult::*;
-		use crate::decaf::Type;
-		use crate::decaf::TypeBase::*;
-		use lnp::past::Modifier::*;
-		use crate::decaf::Visibility::*;
-		use crate::decaf::Scope::*;
 		match self.state {
 			First => {
 				// Normalize Ctor
@@ -1300,6 +1307,15 @@ impl Visitor for DecafTreeBuilder {
 				// Push new scope
 				self.scopes.push(CtorScope(ctor_node.clone()));
 
+				// Add argument as variable
+				for (arg_name, arg_ty_base, arg_array_lvl) in args.iter() {
+					let arg_ty = decaf::Type {
+						base: arg_ty_base.clone(),
+						array_lvl: *arg_array_lvl
+					};
+					self.variable_add(arg_name.clone(), arg_ty);
+				}
+
 				// Visit block
 				let ret =  match ctor.block.accept(self) {
 					Ok(StmtNode(Block(blk))) => {
@@ -1321,11 +1337,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_stmt(&mut self, stmt: &lnp::past::Statement) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use lnp::past::Stmt::*;
-		use crate::decaf::Stmt::*;
-		use SemanticError::*;
 		match self.state {
 			First => panic!("stmt should not be visited in the first pass"),
 			Second => {
@@ -1471,6 +1482,9 @@ impl Visitor for DecafTreeBuilder {
 									let whilestmt = Rc::new(decaf::WhileStmt {
 										condexpr,
 										bodyblock: RefCell::new(None),
+										condbb: RefCell::new(None),
+										bodybb: RefCell::new(None),
+										nextbb: RefCell::new(None)
 									});
 									self.scopes.push(WhileScope(whilestmt.clone()));
 									match stmt.accept(self) {
@@ -1594,12 +1608,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_block(&mut self, block: &lnp::past::Block) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use decaf::Stmt::*;
-		use decaf::Scope::*;
-		use SemanticError::*;
-
 		match self.state {
 			First => panic!("block should not be visited in the first pass"),
 			Second => {
@@ -1637,9 +1645,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_dims(&mut self, dims: &Vec<lnp::past::Dimension>) -> Self::Result {
-		use self::BuilderResult::*;
-		use self::BuilderState::*;
-		use SemanticError::*;
 		match self.state {
 			First => panic!("dims should not be visited in the first pass"),
 			Second => {
@@ -1663,15 +1668,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_primary(&mut self, prim: &lnp::past::Primary) -> Self::Result {
-		use SemanticError::*;
-		use self::BuilderState::*;
-		use self::BuilderResult::*;
-		use lnp::past::Prim::*;
-		use lnp::past::PrimitiveType::*;
-		use lnp::past::NAExpr::*;
-		use crate::decaf::TypeBase::*;
-		use crate::decaf::{CreateArrayExpr, ClassIdExpr, VariableExpr};
-		use crate::decaf::Expr::*;
 		match self.state {
 			First => panic!("primary should not be visited in the first pass"),
 			Second => {
@@ -1738,15 +1734,31 @@ impl Visitor for DecafTreeBuilder {
 					}
 					NonNewArray(nnaexpr) => nnaexpr.expr.accept(self),
 					Identifier(id) => {
-						match self.variable_lookup(id.clone()) {
+						match self.variable_lookup(id.clone()) { // look for variable
 							Some(var) => Ok(ExprNode(Variable(VariableExpr {
 								var
 							}))),
-							None => match self.class_lookup(id.clone()) {
-								Some(cls) => Ok(ExprNode(ClassId(ClassIdExpr {
-									cls,
-								}))),
-								None => Err(EUnknownIdentifier)
+							None => { // Look for fields
+								match self.get_top_most_class_scope() {
+									Some(ClassScope(cls)) => {
+										match cls.get_field_by_name(&id) {
+											Some(field) => {
+												Ok(ExprNode(FieldAccess(FieldAccessExpr {
+													var: Box::new(This(ThisExpr {cls: cls.clone()})),
+													cls,
+													fld: field,
+												})))
+											}
+											None => match self.class_lookup(id.clone()) {
+												Some(cls) => Ok(ExprNode(ClassId(ClassIdExpr {
+													cls,
+												}))),
+												None => Err(EUnknownIdentifier)
+											}
+										}
+									}
+									_ => Err(ENotInClassScope)
+								}
 							}
 						}
 					}
@@ -1756,19 +1768,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_nnaexpr(&mut self, nnaexpr: &lnp::past::NNAExpr) -> Self::Result {
-		use self::BuilderState::*;
-		use self::BuilderResult::*;
-		use lnp::past::Litr::*;
-		use lnp::past::NNAExpr::*;
-		use lnp::past::AExpr::*;
-		use lnp::past::FExpr::*;
-		use crate::decaf::TypeBase::*;
-		use crate::decaf::Scope::*;
-		use crate::decaf::{CreateObjExpr, MethodCallExpr, SuperCallExpr,
-						   ArrayAccessExpr, FieldAccessExpr, VariableExpr};
-		use crate::decaf::LiteralExpr::*;
-		use crate::decaf::Expr::*;
-		use SemanticError::*;
 		match self.state {
 			First => panic!("block should not be visited in the first pass"),
 			Second => {
@@ -2105,11 +2104,6 @@ impl Visitor for DecafTreeBuilder {
 	}
 
 	fn visit_this(&mut self) -> Self::Result {
-		use decaf::Expr::*;
-		use self::BuilderResult::*;
-		use decaf::Scope::*;
-		use decaf::ThisExpr;
-		use SemanticError::*;
 		match self.get_top_most_class_scope() {
 			Some(ClassScope(cls)) => {
 				match self.get_top_most_method_scope() {
@@ -2129,7 +2123,6 @@ impl Visitor for DecafTreeBuilder {
 }
 
 pub fn parse_decaf<'a>(src: &str) -> Result<Program, String> {
-	use self::BuilderResult::*;
 	let syntactic_program = lnp::parse_decaf(src);
 	let mut builder = DecafTreeBuilder::new();
 	match builder.visit_program(&syntactic_program) {
@@ -2143,3 +2136,14 @@ pub fn parse_decaf<'a>(src: &str) -> Result<Program, String> {
 		Err(e) => Err(format!("{:?}", e))
 	}
 }
+
+// TODO: disallow calling private method in this case:
+// class Foo {
+//     public void f(Foo foo) {
+//          foo.h()
+//     }
+//     private void h() {
+//     }
+// }
+
+// TODO: check argument type compatibility
