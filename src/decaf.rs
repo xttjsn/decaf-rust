@@ -18,13 +18,13 @@ impl fmt::Display for Visibility {
 		use Visibility::*;
 		match self {
 			Pub => {
-				write!(f, "pub");
+				write!(f, "pub")?;
 			}
 			Prot => {
-				write!(f, "prot");
+				write!(f, "prot")?;
 			}
 			Priv => {
-				write!(f, "priv");
+				write!(f, "priv")?;
 			}
 		}
 		Ok(())
@@ -42,31 +42,40 @@ impl fmt::Display for Type {
 		use TypeBase::*;
 		match &self.base {
 			UnknownTy(name) => {
-				write!(f, "{}_{}", name, self.array_lvl);
+				write!(f, "{}_{}", name, self.array_lvl)?;
 			}
 			BoolTy => {
-				write!(f, "bool_{}", self.array_lvl);
+				write!(f, "bool_{}", self.array_lvl)?;
 			}
 			IntTy => {
-				write!(f, "int_{}", self.array_lvl);
+				write!(f, "int_{}", self.array_lvl)?;
 			}
 			CharTy => {
-				write!(f, "char_{}", self.array_lvl);
+				write!(f, "char_{}", self.array_lvl)?;
 			}
 			StrTy => {
-				write!(f, "str_{}", self.array_lvl);
+				write!(f, "str_{}", self.array_lvl)?;
 			}
 			VoidTy => {
-				write!(f, "void_{}", self.array_lvl);
+				write!(f, "void_{}", self.array_lvl)?;
 			}
 			NULLTy => {
-				write!(f, "null_{}", self.array_lvl);
+				write!(f, "null_{}", self.array_lvl)?;
 			}
 			ClassTy(cls) => {
-				write!(f, "{}_{}", cls.name, self.array_lvl);
+				write!(f, "{}_{}", cls.name, self.array_lvl)?;
 			}
 		}
 		Ok(())
+	}
+}
+
+impl From<&Rc<Type>> for Type {
+	fn from(ty: &Rc<Type>) -> Self {
+		Type {
+			base: ty.base.clone(),
+			array_lvl: ty.array_lvl
+		}
 	}
 }
 
@@ -330,7 +339,7 @@ impl VariableTable for Vec<Rc<Variable>> {
 				return;
 			}
 		}
-		println!("{} not found in variable table", name);
+		panic!("{} not found in variable table", name);
 	}
 }
 

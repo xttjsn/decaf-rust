@@ -1,11 +1,11 @@
-use std::cell::{RefCell, Ref};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::decaf;
 use crate::decaf::{Returnable, Value, VTable, Scope::*, Expr::*, AssignExpr, BinArithExpr,
 				   UnArithExpr, BinLogicalExpr, UnNotExpr, BinCmpExpr, CreateArrayExpr,
-				   LiteralExpr, ThisExpr, CreateObjExpr, MethodCallExpr, SuperCallExpr,
+				   ThisExpr, CreateObjExpr, MethodCallExpr, SuperCallExpr,
 				   ArrayAccessExpr, FieldAccessExpr, VariableExpr, ClassIdExpr, Type, TypeBase::*,
 				   Visibility::*, LiteralExpr::*, Stmt::*};
 
@@ -359,9 +359,6 @@ impl ASTBuilder for DecafTreeBuilder {
 				base_ty: decaf::TypeBase,
 				array_lvl: u32,
 				hook: Option<Self::ClassHook>) -> Option<decaf::Type> {
-		use self::BuilderState::*;
-		use crate::decaf::Type;
-		use crate::decaf::TypeBase::*;
 		match self.state {
 			First => {
 				match base_ty {
@@ -555,7 +552,7 @@ impl ASTBuilder for DecafTreeBuilder {
 	}
 
 	fn load_builtin(&mut self) {
-		use decaf::{Class, Method, Field, Type, TypeBase::*};
+		use decaf::{Class, Method, TypeBase::*};
 		let objcls = Rc::new(Class::new("Object".to_string()));
 		let strcls = Rc::new(Class::new("String".to_string()));
 		let iocls = Rc::new(Class::new("IO".to_string()));
@@ -570,7 +567,7 @@ impl ASTBuilder for DecafTreeBuilder {
 //		}
 
 		// putChar, putString, putInt, getChar, getInt, getLine, peek()
-		*iocls.sup.borrow_mut() = Some(iocls.clone());
+		*iocls.sup.borrow_mut() = Some(objcls.clone());
 		{
 			let put_char = Method::new("putChar".to_string(), iocls.clone());
 			*put_char.stat.borrow_mut() = true;
@@ -1054,6 +1051,10 @@ impl Visitor for DecafTreeBuilder {
 				self.scopes.push(MethodScope(method.clone()));
 
 				// Add argument as variable
+				self.variable_add("this".into(), Type {
+					base: ClassTy(cls.clone()),
+					array_lvl: 0
+				});
 				for (arg_name, arg_ty_base, arg_array_lvl) in args.iter() {
 					let arg_ty = decaf::Type {
 						base: arg_ty_base.clone(),
@@ -1063,11 +1064,8 @@ impl Visitor for DecafTreeBuilder {
 				}
 
 				// Visit block
-				debug!("trying to visit block");
 				let ret = match mthd.block.accept(self) {
 					Ok(StmtNode(Block(blk))) => {
-						debug!("setting method body block");
-
 						match return_ty {
 							VoidTy => {
 								*method.body.borrow_mut() = Some(blk);
@@ -1308,6 +1306,10 @@ impl Visitor for DecafTreeBuilder {
 				self.scopes.push(CtorScope(ctor_node.clone()));
 
 				// Add argument as variable
+				self.variable_add("this".into(), Type {
+					base: ClassTy(cls.clone()),
+					array_lvl: 0
+				});
 				for (arg_name, arg_ty_base, arg_array_lvl) in args.iter() {
 					let arg_ty = decaf::Type {
 						base: arg_ty_base.clone(),

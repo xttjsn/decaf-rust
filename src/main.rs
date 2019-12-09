@@ -94,10 +94,12 @@ fn compile_file(matches: &Matches) -> Result<(), String> {
 		llvm_opt = 3;
 	}
 
-	generator.optimize(llvm_opt);
+	println!("optimize skipped");
+//	generator.optimize(llvm_opt);
 	let obj_file = convert_io_error(NamedTempFile::new())?;
 	let obj_file_path = obj_file.path().to_str().expect("path not valid utf-8");
-	generator.write_object_file(&obj_file_path)?;
+	// generator.write_object_file(&obj_file_path)?;
+	generator.write_object_file("C:\\Users\\xtt\\Documents\\src\\decaf-rust\\obj.tmp")?;
 
 	let output_name = executable_name(path);
 	generator.link_object_file(
