@@ -3,11 +3,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::decaf;
-use crate::decaf::{Returnable, Value, VTable, Scope::*, Expr::*, AssignExpr, BinArithExpr,
-				   UnArithExpr, BinLogicalExpr, UnNotExpr, BinCmpExpr, CreateArrayExpr,
-				   ThisExpr, CreateObjExpr, MethodCallExpr, SuperCallExpr,
-				   ArrayAccessExpr, FieldAccessExpr, VariableExpr, ClassIdExpr, Type, TypeBase::*,
-				   Visibility::*, LiteralExpr::*, Stmt::*};
+use crate::decaf::{Returnable, Value, VTable, Scope::*, Expr::*, AssignExpr, BinArithExpr, UnArithExpr, BinLogicalExpr, UnNotExpr, BinCmpExpr, CreateArrayExpr, ThisExpr, CreateObjExpr, MethodCallExpr, SuperCallExpr, ArrayAccessExpr, FieldAccessExpr, VariableExpr, ClassIdExpr, Type, TypeBase::*, Visibility::*, LiteralExpr::*, Stmt::*, Ctor};
 
 use SemanticError::*;
 use BuilderState::*;
@@ -16,6 +12,8 @@ use BuilderResult::*;
 use crate::lnp;
 use lnp::past::{Modifier::*, Litr::*, NNAExpr::*, AExpr::*, FExpr::*, NAExpr::*, Prim::*,
 				PrimitiveType::*, Stmt::*, Expr::*, BinOp::*, UnOp::*};
+
+use crate::codegen::LLVMName;
 
 macro_rules! debug {
 	() => (println!());
@@ -149,6 +147,8 @@ pub enum SemanticError {
 	EUnknownIdentifier,
 	EMissingReturn,
 	EUninitializedArray,
+	EArrayNegativeLevel,
+	EMethodCallWithoutMethod,
 	ENotInClassScope,
 }
 
@@ -723,6 +723,28 @@ impl Visitor for DecafTreeBuilder {
 
 					self.scopes.push(decaf::Scope::ClassScope(new_class.clone()));
 
+					// Define default constructor
+					{
+						let default_ctor = Rc::new(decaf::Ctor::new(new_class.clone()));
+						self.scopes.push(CtorScope(default_ctor.clone()));
+						self.variable_add("this".into(), Type {
+							base: ClassTy(new_class.clone()),
+							array_lvl: 0,
+						});
+						*default_ctor.body.borrow_mut() = Some(
+							Rc::new(decaf::BlockStmt {
+								vartbl: RefCell::new(vec![]),
+								stmts: RefCell::new(vec![Return(decaf::ReturnStmt{
+									expr: Some(This(decaf::ThisExpr {
+										cls: new_class.clone(),
+									}))
+								})])
+							})
+						);
+						self.scopes.pop();
+						new_class.pub_ctors.borrow_mut().push(default_ctor);
+					}
+
 					println!("trying to visit class member");
 					for member in cls_node.member_list.iter() {
 						match member {
@@ -733,6 +755,11 @@ impl Visitor for DecafTreeBuilder {
 					}
 
 					self.scopes.pop();
+
+					// Report vtable
+					for (ix, method) in new_class.vtable.borrow().iter().enumerate() {
+						println!("The {}-th method in {}'s vtable is {}", ix, new_class.name, method.name);
+					}
 
 					// If the class is fully resolved invoke class resolution hook for it
 					// A class is fully resolved if it has a known super
@@ -905,6 +932,7 @@ impl Visitor for DecafTreeBuilder {
 
 				// Get arg types
 				for (arg_name, arg_ty, arg_array_lvl) in args.into_iter() {
+					println!("{} has arg {}", method_node.llvm_name(), arg_name);
 					let tmp = method_node.clone();
 					let tmp_name = arg_name.clone();
 					if let Some(arg_ty) = self.type_add(arg_ty.clone(),
@@ -929,9 +957,7 @@ impl Visitor for DecafTreeBuilder {
 				}
 
 				// Check name conflict
-				if curr_cls.pub_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
-					curr_cls.prot_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) ||
-					curr_cls.priv_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) {
+				if curr_cls.local_methods.borrow().iter().any(|m| m.has_same_signature(method_node.as_ref())) {
 					panic!("method redefinition")
 				}
 
@@ -972,7 +998,8 @@ impl Visitor for DecafTreeBuilder {
 								if let ModStatic(_) = mthd.modies[1] {
 									*method_node.vis.borrow_mut() = Pub;
 									*method_node.stat.borrow_mut() = true;
-									curr_cls.pub_static_methods.borrow_mut().push(method_node);
+									curr_cls.pub_static_methods.borrow_mut().push(method_node.clone());
+									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -981,7 +1008,8 @@ impl Visitor for DecafTreeBuilder {
 								if let ModStatic(_) = mthd.modies[1] {
 									*method_node.vis.borrow_mut() = Priv;
 									*method_node.stat.borrow_mut() = true;
-									curr_cls.priv_static_methods.borrow_mut().push(method_node);
+									curr_cls.priv_static_methods.borrow_mut().push(method_node.clone());
+									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -990,7 +1018,8 @@ impl Visitor for DecafTreeBuilder {
 								if let ModStatic(_) = mthd.modies[1] {
 									*method_node.vis.borrow_mut() = Prot;
 									*method_node.stat.borrow_mut() = true;
-									curr_cls.prot_static_methods.borrow_mut().push(method_node);
+									curr_cls.prot_static_methods.borrow_mut().push(method_node.clone());
+									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -1000,17 +1029,20 @@ impl Visitor for DecafTreeBuilder {
 									ModPublic(_) => {
 										*method_node.vis.borrow_mut() = Pub;
 										*method_node.stat.borrow_mut() = true;
-										curr_cls.pub_static_methods.borrow_mut().push(method_node);
+										curr_cls.pub_static_methods.borrow_mut().push(method_node.clone());
+										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									ModPrivate(_) => {
 										*method_node.vis.borrow_mut() = Priv;
 										*method_node.stat.borrow_mut() = true;
-										curr_cls.priv_static_methods.borrow_mut().push(method_node);
+										curr_cls.priv_static_methods.borrow_mut().push(method_node.clone());
+										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									ModProtected(_) => {
 										*method_node.vis.borrow_mut() = Prot;
 										*method_node.stat.borrow_mut() = true;
-										curr_cls.prot_static_methods.borrow_mut().push(method_node);
+										curr_cls.prot_static_methods.borrow_mut().push(method_node.clone());
+										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									_ => panic!("cannot have more than one static modifiers"),
 								}
@@ -1043,9 +1075,16 @@ impl Visitor for DecafTreeBuilder {
 					UnknownTy(cls_name) => ClassTy(self.class_lookup(cls_name).unwrap()),
 					_ => ty_base,
 				}, array_lvl)).collect();
+				let return_ty = match return_ty {
+					UnknownTy(cls_name) => ClassTy(self.class_lookup(cls_name).unwrap()),
+					_ => return_ty
+				};
 
 				// Get current method
-				let method = cls.get_method_by_signature(&return_ty, array_lvl, &args, is_static, &name).unwrap();
+				let method = match cls.get_method_by_signature(&return_ty, array_lvl, &args, is_static, &name) {
+					Some(m) => m,
+					None => panic!("fail to get method by signature: {:?}_{}_{:?}_{}_{}", return_ty, array_lvl, args, is_static, name),
+				};
 
 				// Push new scope
 				self.scopes.push(MethodScope(method.clone()));
@@ -1113,7 +1152,7 @@ impl Visitor for DecafTreeBuilder {
 							}
 						};
 						// TODO : Ord trait for Type
-						match lhs.get_type().is_compatible_with(&rhs.get_type()) {
+						match lhs.get_type().is_compatible_with(&rhs.get_type(), false) {
 							true => {
 								match binop.op {
 									AssignOp => {
@@ -1369,7 +1408,7 @@ impl Visitor for DecafTreeBuilder {
 													Ok(init_expr_v) => match init_expr_v {
 														ExprNode(init_expr_v) => {
 															let init_expr_ty = init_expr_v.get_type();
-															if init_expr_ty.is_compatible_with(&real_ty) {
+															if init_expr_ty.is_compatible_with(&real_ty, false) {
 																self.variable_add(name.clone(), real_ty.clone());
 																res.push(Declare(decaf::DeclareStmt {
 																	name: name.clone(),
@@ -1534,7 +1573,7 @@ impl Visitor for DecafTreeBuilder {
 										let ret_ty = retexpr.get_type();
 										match self.get_top_most_method_scope() {
 											Some(MethodScope(method)) => {
-												if ret_ty.is_compatible_with(&method.return_ty.borrow()) {
+												if ret_ty.is_compatible_with(&method.return_ty.borrow(), false) {
 													Ok(StmtNode(Return(decaf::ReturnStmt {
 														expr: Some(retexpr),
 													})))
@@ -1829,29 +1868,60 @@ impl Visitor for DecafTreeBuilder {
 								// Lookup the method
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
-										match cls.get_compatible_level0_method(&arg_exprs, id) {
-											Some(method) => {
-												if method.name == *id {
-													Ok(ExprNode(MethodCall(MethodCallExpr {
-														var: Box::new({
-															match self.visit_this() {
-																Ok(ExprNode(this_expr)) => match this_expr {
-																	This(_) => this_expr,
-																	_ => return Err(EThisNotFound),
-																},
-																_ => return Err(EExprNodeNotFound)
-															}
-														}),
-														method,
-														args: arg_exprs,
-													})))
+										match self.get_top_most_method_scope() {
+											Some(MethodScope(method)) => {
+												match *method.stat.borrow() {
+													false => {
+														println!("========trying to find method \"{}\"======", id);
+														match cls.get_compatible_level0_method(&arg_exprs, id) {
+															Some(method) => {
+																if method.name == *id {
+																	Ok(ExprNode(MethodCall(MethodCallExpr {
+																		var: Box::new({
+																			match self.visit_this() {
+																				Ok(ExprNode(this_expr)) => match this_expr {
+																					This(_) => this_expr,
+																					_ => return Err(EThisNotFound),
+																				},
+																				_ => return Err(EExprNodeNotFound)
+																			}
+																		}),
+																		method,
+																		args: arg_exprs,
+																	})))
+																}
+																else {
+																	Err(ENoCompatibleMethod(id.clone()))
+																}
+															},
+															None => Err(ENoCompatibleMethod(id.clone()))
+														}
+													}
+													true => {
+														println!("========trying to find static method \"{}\"======", id);
+														match cls.get_compatible_level0_static_method(&arg_exprs, id) {
+															Some(method) => {
+																if method.name == *id {
+																	Ok(ExprNode(MethodCall(MethodCallExpr {
+																		var: Box::new(ClassId(ClassIdExpr {
+																			cls: cls.clone()
+																		})),
+																		method,
+																		args: arg_exprs,
+																	})))
+																}
+																else {
+																	Err(ENoCompatibleMethod(id.clone()))
+																}
+															},
+															None => Err(ENoCompatibleMethod(id.clone()))
+														}
+													}
 												}
-												else {
-													Err(ENoCompatibleMethod(id.clone()))
-												}
-											},
-											None => Err(ENoCompatibleMethod(id.clone()))
+											}
+											_ => Err(EMethodCallWithoutMethod),
 										}
+
 									},
 									_ => Err(EMethodCallWithoutClass),
 								}
@@ -2036,13 +2106,33 @@ impl Visitor for DecafTreeBuilder {
 															} {
 																Some(fld) => Ok(ExprNode(FieldAccess(FieldAccessExpr {
 																	var: Box::new(prim_expr),
-																	cls: cls,
-																	fld: fld,
+																	cls,
+																	fld,
 																}))),
 																None => Err(ENoCompatibleField)
 															}
 														}
-														_ => Err(EArrayTypeNoField)
+														_ => {
+															if ty.array_lvl > 0 {
+																if id == "length" {
+																	// Only field "length"
+																	let fld = Rc::new(decaf::Field::new("length".into()));
+																	fld.set_base_type(Rc::new(decaf::Type {
+																		base: IntTy,
+																		array_lvl: 0
+																	}));
+																	Ok(ExprNode(FieldAccess(FieldAccessExpr {
+																		var: Box::new(prim_expr),
+																		cls,
+																		fld,
+																	})))
+																} else {
+																	Err(ENoCompatibleField)
+																}
+															} else {
+																Err(EArrayNegativeLevel)
+															}
+														}
 													}
 												}
 												_ => Err(EPrimitiveTypeNoField)

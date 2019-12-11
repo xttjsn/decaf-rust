@@ -80,7 +80,10 @@ impl From<&Rc<Type>> for Type {
 }
 
 impl Type {
-	pub fn is_compatible_with(&self, rhs: &Type) -> bool {
+	pub fn is_compatible_with(&self, rhs: &Type, strict: bool) -> bool {
+		// Here the semantic is a parameter of type Self can be passed in
+		// a function call with argument of type rhs.
+		// i.e. self must be equal to or a subtype of rhs
 		use TypeBase::*;
 		match self.array_lvl == rhs.array_lvl {
 			false => false,
@@ -93,6 +96,13 @@ impl Type {
 							false => {
 								match (&self.base, &rhs.base) {
 									(ClassTy(_), NULLTy) | (NULLTy, ClassTy(_)) => true,
+									(ClassTy(this_cls), ClassTy(that_cls)) => {
+										if !strict {
+											this_cls.is_subtype_of(that_cls)
+										} else {
+											false
+										}
+									}
 									_ => false
 								}
 							}
@@ -725,8 +735,9 @@ impl Scope {
 				panic!("variable_add is supported only for block scope"),
 			MethodScope(method) => {
 				if method.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
-					panic!("variable {:?} is already defined", name)
+					panic!("variable {:?} is already defined in method \"{}\"", name, method.name)
 				}
+				println!("adding variable in method \"{}\" scope {}", method.name, name);
 				let var = Rc::new(Variable {
 					name,
 					ty,
@@ -737,8 +748,9 @@ impl Scope {
 			}
 			CtorScope(ctor) => {
 				if ctor.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
-					panic!("variable {:?} is already defined", name)
+					panic!("variable {:?} is already defined in ctor", name)
 				}
+				println!("adding variable in ctor scope {}", name);
 				let var = Rc::new(Variable {
 					name,
 					ty,
@@ -749,8 +761,9 @@ impl Scope {
 			}
 			BlockScope(blk) => {
 				if blk.vartbl.borrow().iter().any(|v| v.name == name.as_str()) {
-					panic!("variable {:?} is already defined", name)
+					panic!("variable {:?} is already defined block", name)
 				}
+				println!("adding variable in block scope {}", name);
 				let var = Rc::new(Variable {
 					name,
 					ty,
@@ -768,6 +781,7 @@ pub struct Field {
 	pub name: String,
 	pub ty: RefCell<Rc<Type>>,
 	pub init_expr: RefCell<Option<Expr>>,
+	pub refcount: RefCell<u32>,
 }
 
 impl Field {
@@ -779,6 +793,7 @@ impl Field {
 				array_lvl: 0,
 			})),
 			init_expr: RefCell::new(None),
+			refcount: RefCell::new(0),
 		}
 	}
 
@@ -789,9 +804,14 @@ impl Field {
 	pub fn set_init_expr(&self, expr: Expr) {
 		*self.init_expr.borrow_mut() = Some(expr);
 	}
+
+	pub fn next_refcount(&self) -> u32 {
+		*self.refcount.borrow_mut() += 1;
+		*self.refcount.borrow()
+	}
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Class {
 	pub name: String,
 	pub sup: RefCell<Option<Rc<Class>>>,
@@ -807,7 +827,14 @@ pub struct Class {
 	pub pub_static_methods: RefCell<Vec<Rc<Method>>>,
 	pub prot_static_methods: RefCell<Vec<Rc<Method>>>,
 	pub priv_static_methods: RefCell<Vec<Rc<Method>>>,
+	pub local_methods: RefCell<Vec<Rc<Method>>>,
 	pub vtable: RefCell<Vec<Rc<Method>>>,
+}
+
+impl PartialEq for Class {
+	fn eq(&self, other: &Self) -> bool {
+		self.name == other.name
+	}
 }
 
 fn prepend<T>(v: &[T], s: &[T]) -> Vec<T>
@@ -848,7 +875,7 @@ impl VTable for Vec<Rc<Method>> {
 impl Class {
 	pub fn new(name: String) -> Self {
 		Class {
-			name: name,
+			name,
 			sup: RefCell::new(None),
 			pub_fields: RefCell::new(vec![]),
 			prot_fields: RefCell::new(vec![]),
@@ -862,6 +889,7 @@ impl Class {
 			pub_static_methods: RefCell::new(vec![]),
 			prot_static_methods: RefCell::new(vec![]),
 			priv_static_methods: RefCell::new(vec![]),
+			local_methods: RefCell::new(vec![]),
 			vtable: RefCell::new(vec![]),
 		}
 	}
@@ -896,6 +924,21 @@ impl Class {
 		}
 
 		Ok(())
+	}
+
+	pub fn is_subtype_of(&self, rhs: &Class) -> bool {
+		let mut curr = self;
+		let mut v = vec![];
+		while curr.sup.borrow().is_some() {
+			if curr == rhs {
+				return true;
+			} else {
+				let cls = curr.sup.borrow().clone().unwrap();
+				v.push(cls);
+				curr = v.last().unwrap().as_ref();
+			}
+		}
+		curr == rhs
 	}
 
 	pub fn set_super(self: Rc<Class>, supr: Rc<Class>) {
@@ -962,7 +1005,7 @@ impl Class {
 	pub fn get_field_index(&self, field: &Rc<Field>) -> Option<u32> {
 		let mut base = 0;
 		match self.pub_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -973,7 +1016,7 @@ impl Class {
 		};
 
 		match self.prot_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -984,7 +1027,7 @@ impl Class {
 		};
 
 		match self.prot_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow())
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
 		}) {
 			Some(ix) => Some(ix as u32 + base),
 			None => None
@@ -993,10 +1036,13 @@ impl Class {
 
 	pub fn get_method_by_signature(&self, return_ty: &TypeBase, array_lvl: u32,
 								   args: &Vec<(String, TypeBase, u32)>, is_static: bool, name: &str) -> Option<Rc<Method>> {
-		println!("get_method_by_signature: \n return_ty: {:?}\n array_lvl: {}\n args: {:?}\n is_static: {}", return_ty, array_lvl, args, is_static);
+		println!("get_method_by_signature: \n return_ty: {:?}\n array_lvl: {}\n is_static: {}",
+				 return_ty,
+				 array_lvl,
+				 is_static);
 		let go = |methods: &Vec<Rc<Method>>| {
-			'outer: for method in methods.iter() {
-				if method.name != name {
+			'outer: for method in methods.iter().rev() { // Reverse order to get local method
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 				if method.return_ty.borrow().base != *return_ty ||
@@ -1040,7 +1086,10 @@ impl Class {
 
 	pub fn get_ctor_by_signature(&self, args: &Vec<(String, TypeBase, u32)>) -> Option<Rc<Ctor>> {
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			'outer: for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter().rev() {
+				if ctor.args.borrow().len() != args.len() {
+					continue;
+				}
 				for (arga, argb) in ctor.args.borrow().iter().zip(args.iter()) {
 					if arga.0 != argb.0 || arga.1.base != argb.1 || arga.1.array_lvl != argb.2 {
 						continue 'outer;
@@ -1065,9 +1114,12 @@ impl Class {
 	pub fn get_compatible_super_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			'outer: for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter().rev() {
+				if ctor.args.borrow().len() != args.len() {
+					continue;
+				}
 				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1093,9 +1145,12 @@ impl Class {
 	pub fn get_compatible_level0_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			'outer: for ctor in ctors.iter() {
-				'inner: for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+			'outer: for ctor in ctors.iter().rev() {
+				if ctor.args.borrow().len() != args.len() {
+					continue;
+				}
+				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1119,9 +1174,12 @@ impl Class {
 	pub fn get_compatible_level1_ctor(&self, args: &Vec<Expr>) -> Option<Rc<Ctor>> {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 		let go = |ctors: &Vec<Rc<Ctor>>| {
-			'outer: for ctor in ctors.iter() {
+			'outer: for ctor in ctors.iter().rev() {
+				if ctor.args.borrow().len() != args.len() {
+					continue;
+				}
 				for (arga, ty) in ctor.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1140,12 +1198,12 @@ impl Class {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			'outer: for method in methods.iter() {
-				if method.name != name {
+			'outer: for method in methods.iter().rev() {
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1170,13 +1228,13 @@ impl Class {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			'outer: for method in methods.iter() {
-				if method.name != name {
+			'outer: for method in methods.iter().rev() {
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1196,11 +1254,19 @@ impl Class {
 
 		let go = |methods: &Vec<Rc<Method>>| {
 			'outer: for method in methods.iter() {
-				if method.name != name {
+				println!("looping through static method \"{}\"", method.name);
+				println!("we have args: {}",
+						 method.args.borrow().iter()
+							 .map(|arg| format!("{}", arg.1))
+							 .collect::<Vec<String>>().join("_"));
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					println!("asking for args: {}",
+					tys.iter().map(|ty| format!("{}", ty))
+						.collect::<Vec<String>>().join("_"));
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1226,11 +1292,11 @@ impl Class {
 
 		let go = |methods: &Vec<Rc<Method>>| {
 			'outer: for method in methods.iter() {
-				if method.name != name {
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}
@@ -1249,12 +1315,12 @@ impl Class {
 		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
 
 		let go = |methods: &Vec<Rc<Method>>| {
-			'outer: for method in methods.iter() {
-				if method.name != name {
+			'outer: for method in methods.iter().rev() {
+				if method.name != name || method.args.borrow().len() != args.len() {
 					continue;
 				}
 				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
-					if arga.1.base != ty.base || arga.1.array_lvl != ty.array_lvl {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
 						continue 'outer;
 					}
 				}

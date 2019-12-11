@@ -5,6 +5,37 @@ pub mod lexer {
 	use std::str::FromStr;
 	use std::fmt;
 
+	#[derive(Debug, PartialEq)]
+	enum TokenError {
+		EscapeAtEndOfString,
+		InvalidEscapedChar(char),
+	}
+
+	struct InterpretEscapedString<'a> {
+		s: std::str::Chars<'a>,
+	}
+
+	impl<'a> Iterator for InterpretEscapedString<'a> {
+		type Item = Result<char, TokenError>;
+
+		fn next(&mut self) -> Option<Self::Item> {
+			self.s.next().map(|c| match c {
+				'\\' => match self.s.next() {
+					None => Err(TokenError::EscapeAtEndOfString),
+					Some('n') => Ok('\n'),
+					Some('\\') => Ok('\\'),
+					Some('t') => Ok('\t'),
+					Some(c) => Err(TokenError::InvalidEscapedChar(c)),
+				}
+				c => Ok(c)
+			})
+		}
+	}
+
+	fn interpret_escaped_string(s: &str) -> Result<String, TokenError> {
+		(InterpretEscapedString {s : s.chars()}).collect()
+	}
+
     #[derive(Debug, Clone)]
 	#[allow(dead_code)]
     pub enum Token {
@@ -137,7 +168,8 @@ pub mod lexer {
 		}),
 		r#"\"[^\n]*\""# => Token::StrLit({
 			let len = text.len();
-			String::from_str(&text[1..len]).unwrap()
+			interpret_escaped_string(&text[1..len-1]).unwrap()
+			// String::from_str(&text[1..len-1]).unwrap()
 		}),
 		r#"true|false"# => Token::BoolLit(text.parse().unwrap()),
 		r#"null"# => Token::NullLit,

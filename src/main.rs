@@ -11,8 +11,6 @@ use std::path::Path;
 
 use decaflib::{treebuild, codegen};
 
-use tempfile::NamedTempFile;
-
 fn slurp(path: &str) -> Result<String, String> {
 	let mut file = match File::open(path) {
 		Ok(file) => file,
@@ -53,13 +51,12 @@ fn executable_name_relative_path() {
     assert_eq!(executable_name("bar/baz.decaf"), "baz");
 }
 
-
-fn convert_io_error<T>(result: Result<T, std::io::Error>) -> Result<T, String> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(e) => Err(format!("{}", e)),
-    }
-}
+//fn convert_io_error<T>(result: Result<T, std::io::Error>) -> Result<T, String> {
+//    match result {
+//        Ok(value) => Ok(value),
+//        Err(e) => Err(format!("{}", e)),
+//    }
+//}
 
 fn compile_file(matches: &Matches) -> Result<(), String> {
 	let path = &matches.free[0];
@@ -94,12 +91,10 @@ fn compile_file(matches: &Matches) -> Result<(), String> {
 		llvm_opt = 3;
 	}
 
-	println!("optimize skipped");
-//	generator.optimize(llvm_opt);
-	let obj_file = convert_io_error(NamedTempFile::new())?;
-	let obj_file_path = obj_file.path().to_str().expect("path not valid utf-8");
-	// generator.write_object_file(&obj_file_path)?;
-	generator.write_object_file("C:\\Users\\xtt\\Documents\\src\\decaf-rust\\obj.tmp")?;
+	generator.optimize(llvm_opt);
+
+	let obj_file_path = Path::new("./a.out").to_str().expect("path not valid utf-8");
+	generator.write_object_file(&obj_file_path)?;
 
 	let output_name = executable_name(path);
 	generator.link_object_file(
