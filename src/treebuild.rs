@@ -961,6 +961,8 @@ impl Visitor for DecafTreeBuilder {
 					panic!("method redefinition")
 				}
 
+				curr_cls.local_methods.borrow_mut().push(method_node.clone());
+
 				match (mthd.modies.len(), mthd.modies.last()) {
 					(1, Some(modifier)) => {
 						match modifier {
@@ -999,7 +1001,6 @@ impl Visitor for DecafTreeBuilder {
 									*method_node.vis.borrow_mut() = Pub;
 									*method_node.stat.borrow_mut() = true;
 									curr_cls.pub_static_methods.borrow_mut().push(method_node.clone());
-									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -1009,7 +1010,6 @@ impl Visitor for DecafTreeBuilder {
 									*method_node.vis.borrow_mut() = Priv;
 									*method_node.stat.borrow_mut() = true;
 									curr_cls.priv_static_methods.borrow_mut().push(method_node.clone());
-									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -1019,7 +1019,6 @@ impl Visitor for DecafTreeBuilder {
 									*method_node.vis.borrow_mut() = Prot;
 									*method_node.stat.borrow_mut() = true;
 									curr_cls.prot_static_methods.borrow_mut().push(method_node.clone());
-									curr_cls.local_methods.borrow_mut().push(method_node);
 								} else {
 									panic!("second modifer must be static");
 								}
@@ -1030,19 +1029,16 @@ impl Visitor for DecafTreeBuilder {
 										*method_node.vis.borrow_mut() = Pub;
 										*method_node.stat.borrow_mut() = true;
 										curr_cls.pub_static_methods.borrow_mut().push(method_node.clone());
-										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									ModPrivate(_) => {
 										*method_node.vis.borrow_mut() = Priv;
 										*method_node.stat.borrow_mut() = true;
 										curr_cls.priv_static_methods.borrow_mut().push(method_node.clone());
-										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									ModProtected(_) => {
 										*method_node.vis.borrow_mut() = Prot;
 										*method_node.stat.borrow_mut() = true;
 										curr_cls.prot_static_methods.borrow_mut().push(method_node.clone());
-										curr_cls.local_methods.borrow_mut().push(method_node);
 									}
 									_ => panic!("cannot have more than one static modifiers"),
 								}

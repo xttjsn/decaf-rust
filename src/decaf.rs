@@ -5,6 +5,8 @@ use crate::lnp;
 
 use llvm_sys::prelude::*;
 use lnp::past::{BinOp, UnOp};
+use crate::decaf::TypeBase::ClassTy;
+use crate::codegen::LLVMName;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Visibility {
@@ -70,6 +72,126 @@ impl fmt::Display for Type {
 	}
 }
 
+impl fmt::Display for Expr {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		use Expr::*;
+		match self {
+			Assign(expr) => {
+				write!(f, "assign_of_{}_and_{}", &*expr.lhs, &*expr.rhs)?;
+			},
+			BinArith(expr) => {
+				write!(f, "binarith_{:?}_of_{}_and_{}", expr.op, &*expr.lhs, &*expr.rhs)?;
+			},
+			UnArith(expr) => {
+				write!(f, "unarith_{:?}_of_{}", expr.op, &*expr.rhs)?;
+			},
+			BinLogical(expr) => {
+				write!(f, "binlogical_{:?}_of_{}_and_{}", expr.op, &*expr.lhs, &*expr.rhs)?;
+			},
+			UnNot(expr) => {
+				write!(f, "unnot_of_{}", &*expr.rhs)?;
+			},
+			BinCmp(expr) => {
+				write!(f, "bincmp_{:?}_of_{}_and_{}", expr.op, &*expr.lhs, &*expr.rhs)?;
+			},
+			CreateArray(expr) => {
+				write!(f, "createarray_of_{}", &Type{base: expr.ty.clone(), array_lvl: expr.dims.len() as u32})?;
+			},
+			Literal(expr) => {
+				write!(f, "literal_of_{:?}", expr)?;
+			},
+			This(expr) => {
+				write!(f, "this_of_{}", expr.cls.name)?;
+			},
+			CreateObj(expr) => {
+				write!(f, "create_object_of_{}", expr.cls.name)?;
+			},
+			MethodCall(expr) => {
+				write!(f, "method_call_of_{}", expr.method.llvm_name())?;
+			},
+			SuperCall(expr) => {
+				write!(f, "super_call_of_{}", expr.method.llvm_name())?;
+			},
+			ArrayAccess(expr) => {
+				write!(f, "array_access_of_{}", &*expr.var)?;
+			},
+			FieldAccess(expr) => {
+				write!(f, "field_access_of_{}_{}", expr.cls.name, expr.fld.name)?;
+			},
+			Variable(expr) => {
+				write!(f, "variable_of_{}", expr.var.name)?;
+			},
+			ClassId(expr) => {
+				write!(f, "class_id_of_{}", expr.cls.name)?;
+			},
+			NULL => {
+				write!(f, "NULL")?;
+			}
+		}
+		Ok(())
+	}
+}
+
+impl fmt::Display for Stmt {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		use Stmt::*;
+		match self {
+			Declare(stmt) => {
+				write!(f, "declare_of_{}_{}", stmt.ty, stmt.name)?;
+			},
+			If(stmt) => {
+				write!(f, "if")?;
+			},
+			IfElse(stmt) => {
+				write!(f, "ifelse")?;
+			},
+			Expr(stmt) => {
+				write!(f, "expr_of_{}", stmt.expr)?;
+			},
+			While(stmt) => {
+				write!(f, "while_of_{}", stmt.condexpr)?;
+			},
+			Return(stmt) => {
+				match &stmt.expr {
+					Some(e) => write!(f, "return_of_{}", e)?,
+					None => {
+						write!(f, "return_void")?;
+					}
+				};
+			},
+			Continue(stmt) => {
+				write!(f, "continue")?;
+			},
+			Break(stmt) => {
+				write!(f, "break")?;
+			},
+			Super(stmt) => {
+				write!(f, "super_of_{}", stmt.sup.name)?;
+			},
+			Block(stmt) => {
+				write!(f, "block_of_{}_stmts", stmt.stmts.borrow().len())?;
+			},
+			NOP => {
+				write!(f, "NOP")?;
+			}
+		}
+		Ok(())
+	}
+}
+
+impl fmt::Display for Method {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}", self.llvm_name())
+	}
+}
+
+impl fmt::Display for Ctor {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}", self.llvm_name())
+	}
+}
+
+
 impl From<&Rc<Type>> for Type {
 	fn from(ty: &Rc<Type>) -> Self {
 		Type {
@@ -79,11 +201,21 @@ impl From<&Rc<Type>> for Type {
 	}
 }
 
+impl From<&Rc<Class>> for Type {
+	fn from(cls: &Rc<Class>) -> Self {
+		Type {
+			base: ClassTy(cls.clone()),
+			array_lvl: 0,
+		}
+	}
+}
+
 impl Type {
 	pub fn is_compatible_with(&self, rhs: &Type, strict: bool) -> bool {
 		// Here the semantic is a parameter of type Self can be passed in
 		// a function call with argument of type rhs.
 		// i.e. self must be equal to or a subtype of rhs
+		// Allow int to be casted to char, and char to be casted to int
 		use TypeBase::*;
 		match self.array_lvl == rhs.array_lvl {
 			false => false,
