@@ -90,6 +90,7 @@ class Calculator
 
       } else if (isDigit(c)) {
         int num = digitToInt(c);
+        IO.putInt(num);
 
         c = IO.getChar();
         while (isDigit(c)) {
@@ -105,6 +106,7 @@ class Calculator
       } else {
         IO.putString("\nillegal character: '");
         IO.putChar(c);
+		IO.putInt(c);
         IO.putString("'\n");
         c = IO.getChar();
       }

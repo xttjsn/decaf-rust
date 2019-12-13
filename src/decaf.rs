@@ -44,7 +44,7 @@ impl fmt::Display for Type {
 		use TypeBase::*;
 		match &self.base {
 			UnknownTy(name) => {
-				write!(f, "{}_{}", name, self.array_lvl)?;
+				write!(f, "Unknown_{}_{}", name, self.array_lvl)?;
 			}
 			BoolTy => {
 				write!(f, "bool_{}", self.array_lvl)?;
@@ -113,7 +113,7 @@ impl fmt::Display for Expr {
 				write!(f, "super_call_of_{}", expr.method.llvm_name())?;
 			},
 			ArrayAccess(expr) => {
-				write!(f, "array_access_of_{}", &*expr.var)?;
+				write!(f, "array_access_of_{}_with_{}", &*expr.var, &*expr.idx)?;
 			},
 			FieldAccess(expr) => {
 				write!(f, "field_access_of_{}_{}", expr.cls.name, expr.fld.name)?;
@@ -210,6 +210,15 @@ impl From<&Rc<Class>> for Type {
 	}
 }
 
+impl From<&TypeBase> for Type {
+	fn from(ty: &TypeBase) -> Self {
+		Type {
+			base: ty.clone(),
+			array_lvl: 0
+		}
+	}
+}
+
 impl Type {
 	pub fn is_compatible_with(&self, rhs: &Type, strict: bool) -> bool {
 		// Here the semantic is a parameter of type Self can be passed in
@@ -235,6 +244,10 @@ impl Type {
 											false
 										}
 									}
+									(IntTy, CharTy) | (CharTy, IntTy) => {
+										// Only allow such cast if they are scalars (i.e. non array)
+										self.array_lvl == 0
+									},
 									_ => false
 								}
 							}
@@ -249,8 +262,8 @@ impl Type {
 		use TypeBase::*;
 		if self.array_lvl == 0 {
 			match &self.base {
-				UnknownTy(_) | BoolTy | CharTy | VoidTy | NULLTy | ClassTy(_) | StrTy => false,
-				IntTy => true,
+				UnknownTy(_) | BoolTy | VoidTy | NULLTy | ClassTy(_) | StrTy => false,
+				CharTy | IntTy => true,
 			}
 		} else {
 			false
@@ -294,7 +307,7 @@ impl Type {
 	}
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub enum TypeBase {
 	UnknownTy(String),
 	BoolTy,
@@ -304,6 +317,26 @@ pub enum TypeBase {
 	VoidTy,
 	NULLTy,
 	ClassTy(Rc<Class>),
+}
+
+impl PartialEq for TypeBase {
+	fn eq(&self, other: &Self) -> bool {
+		use TypeBase::*;
+
+		match (self, other) {
+			(BoolTy, BoolTy) => true,
+			(IntTy, IntTy) => true,
+			(CharTy, CharTy) => true,
+			(StrTy, StrTy) => true,
+			(VoidTy, VoidTy) => true,
+			(NULLTy, NULLTy) => true,
+			(ClassTy(cls_a), ClassTy(cls_b)) => {
+				println!("Comparing class {} with class {}", cls_a.name, cls_b.name);
+				cls_a.name == cls_b.name
+			}
+			_ => false
+		}
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -334,6 +367,33 @@ impl Method {
 			args: RefCell::new(vec![]),
 			body: RefCell::new(None),
 			vartbl: RefCell::new(vec![]),
+		}
+	}
+
+	pub fn is_main_method(&self) -> bool {
+		if self.name == "main" {
+			if self.args.borrow().len() == 1 {
+				let ty = self.args.borrow().clone();
+				let ty = ty.first().unwrap();
+				match ty {
+					(_, ty) => {
+						match (&ty.base, ty.array_lvl) {
+							(ClassTy(cls), lvl) => {
+								if cls.name == "String" && lvl == 1 {
+									true
+								} else {
+									false
+								}
+							}
+							_ => false
+						}
+					}
+				}
+			} else {
+				false
+			}
+		} else {
+			false
 		}
 	}
 
@@ -450,8 +510,9 @@ pub trait Value {
 	fn get_type(&self) -> Type;
 }
 
-pub trait Returnable {
+pub trait ControlFlow {
 	fn returnable(&self) -> Option<Type>;
+	fn branchable(&self) -> bool;
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -515,7 +576,7 @@ pub enum Stmt {
 	NOP,
 }
 
-impl Returnable for Stmt {
+impl ControlFlow for Stmt {
 	fn returnable(&self) -> Option<Type> {
 		use Stmt::*;
 		match self {
@@ -523,9 +584,9 @@ impl Returnable for Stmt {
 			Declare(_) => None,
 			If(_) => None,
 			IfElse(stmt) => {
-				match Block(stmt.thenblock.clone()).returnable() {
+				match (&*stmt.thenstmt).returnable() {
 					None => None,
-					Some(thenty) => match Block(stmt.elseblock.clone()).returnable() {
+					Some(thenty) => match (&*stmt.elsestmt).returnable() {
 						None => None,
 						Some(elsety) => {
 							if thenty != elsety {
@@ -552,6 +613,24 @@ impl Returnable for Stmt {
 			}
 		}
 	}
+	fn branchable(&self) -> bool {
+		use Stmt::*;
+		match self {
+			NOP => false,
+			Declare(_) => false,
+			If(_) => false,
+			IfElse(_) => false,
+			Expr(_) => false,
+			While(_) => false, // We don't know at compile time if while body will be executed at all
+			Return(_)=> true,
+			Continue(_) => true,
+			Break(_) => true,
+			Super(_) => false,
+			Block(blkstmt) => {
+				blkstmt.stmts.borrow().iter().rev().any(|stmt| stmt.branchable())
+			}
+		}
+	}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -564,14 +643,14 @@ pub struct DeclareStmt {
 #[derive(Debug, PartialEq, Clone)]
 pub struct IfStmt {
 	pub cond: Expr,
-	pub thenblock: Rc<BlockStmt>,
+	pub thenstmt: Box<Stmt>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct IfElseStmt {
 	pub cond: Expr,
-	pub thenblock: Rc<BlockStmt>,
-	pub elseblock: Rc<BlockStmt>,
+	pub thenstmt: Box<Stmt>,
+	pub elsestmt: Box<Stmt>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -1158,7 +1237,7 @@ impl Class {
 			}
 		};
 
-		match self.prot_fields.borrow().iter().position(|f| {
+		match self.priv_fields.borrow().iter().position(|f| {
 			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
 		}) {
 			Some(ix) => Some(ix as u32 + base),

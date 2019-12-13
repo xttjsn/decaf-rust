@@ -152,7 +152,7 @@ pub mod lexer {
         }
    // Check these for Literals  --Raj
 		r#"\' \'"# => Token::CharLit(' '),
-		r#"\'\\n"# => Token::CharLit('\n'),
+		r#"\'\\n\'"# => Token::CharLit('\n'),
 		r#"\'\\t\'"# => Token::CharLit('\t'),
 		r#"\'\\\'"# => Token::CharLit('\\'),
 		r#"\'.\'"# => Token::CharLit({
