@@ -123,7 +123,7 @@ pub enum SemanticError {
 	EContinueNotInLoop,
 	EBreakNotInLoop,
 	ECallingCtorOutsideClass,
-	EVecExprNotFound,
+	EVecExprNotFound(String),
 	ECallingSuperCtorOutsideCtor,
 	EClassNotDefined,
 	EDimExprNotArithType,
@@ -883,7 +883,7 @@ impl Visitor for DecafTreeBuilder {
 						}
 
 					// Create field node
-					let field = Rc::new(crate::decaf::Field::new(field_name));
+					let field = Rc::new(crate::decaf::Field::new(field_name, Some(curr_cls.clone())));
 					let tmp = field.clone();
 
 					// First check if we have change to reuse type
@@ -1413,10 +1413,29 @@ impl Visitor for DecafTreeBuilder {
 					self.variable_add(arg_name.clone(), arg_ty);
 				}
 
+				// Visit super ctor (except for class whose super is Object)
+				*ctor_node.body.borrow_mut() = Some(Rc::new(decaf::BlockStmt{
+					vartbl: RefCell::new(vec![]),
+					stmts: RefCell::new(vec![]),
+				}));
+				let mut stmts = vec![];
+				let sup_cls = cls.sup.borrow().clone().unwrap();
+				if sup_cls.name != "Object" {
+					stmts.push(Super(decaf::SuperStmt {
+						sup: sup_cls.clone(),
+						sup_ctor: sup_cls.get_compatible_level0_ctor(&vec![]).unwrap(), // Look for default constructor
+						args: vec![],
+					}));
+				}
+
 				// Visit block
 				let ret =  match ctor.block.accept(self) {
 					Ok(StmtNode(Block(blk))) => {
-						*ctor_node.body.borrow_mut() = Some(blk);
+						stmts.push(Block(blk));
+						*ctor_node.body.borrow_mut() = Some(Rc::new(decaf::BlockStmt{
+							vartbl: RefCell::new(vec![]),
+							stmts: RefCell::new(stmts),
+						}));
 						Ok(Normal)
 					}
 					Ok(_) => {
@@ -1687,7 +1706,7 @@ impl Visitor for DecafTreeBuilder {
 											Some(_) | None => Err(ECallingCtorOutsideClass)
 										}
 									}
-									_ => Err(EVecExprNotFound)
+									_ => Err(EVecExprNotFound(format!("SuperStmt")))
 								}
 							}
 							None => Err(ECallingSuperCtorOutsideCtor)
@@ -1785,7 +1804,7 @@ impl Visitor for DecafTreeBuilder {
 													Err(EDimExprNotArithType)
 												}
 											},
-											_ => Err(EVecExprNotFound),
+											_ => Err(EVecExprNotFound(format!("NewCustom"))),
 										}
 									}
 									Err(e) => Err(e)
@@ -1907,7 +1926,7 @@ impl Visitor for DecafTreeBuilder {
 										None => Err(ENoCompatibleCtor),
 									}
 								}
-								_ => Err(EVecExprNotFound)
+								_ => Err(EVecExprNotFound(format!("NewObj")))
 							}
 						} else {
 							Err(EClassNotDefined)
@@ -1926,33 +1945,25 @@ impl Visitor for DecafTreeBuilder {
 														println!("========trying to find method \"{}\"======", id);
 														match cls.get_compatible_level0_method(&arg_exprs, id) {
 															Some(method) => {
-																if method.name == *id {
-																	Ok(ExprNode(MethodCall(MethodCallExpr {
-																		var: Box::new({
-																			match self.visit_this() {
-																				Ok(ExprNode(this_expr)) => match this_expr {
-																					This(_) => this_expr,
-																					_ => return Err(EThisNotFound),
-																				},
-																				_ => return Err(EExprNodeNotFound(format!("CallSelfMethod {}", id)))
-																			}
-																		}),
-																		method,
-																		args: arg_exprs,
-																	})))
-																}
-																else {
-																	Err(ENoCompatibleMethod(id.clone()))
-																}
+																Ok(ExprNode(MethodCall(MethodCallExpr {
+																	var: Box::new({
+																		match self.visit_this() {
+																			Ok(ExprNode(this_expr)) => match this_expr {
+																				This(_) => this_expr,
+																				_ => return Err(EThisNotFound),
+																			},
+																			_ => return Err(EExprNodeNotFound(format!("CallSelfMethod {}", id)))
+																		}
+																	}),
+																	method,
+																	args: arg_exprs,
+																})))
+
 															},
-															None => Err(ENoCompatibleMethod(id.clone()))
-														}
-													}
-													true => {
-														println!("========trying to find static method \"{}\"======", id);
-														match cls.get_compatible_level0_static_method(&arg_exprs, id) {
-															Some(method) => {
-																if method.name == *id {
+															// Look for static method
+															None => match cls.get_compatible_level0_static_method(&arg_exprs, id) {
+																Some(method) => {
+
 																	Ok(ExprNode(MethodCall(MethodCallExpr {
 																		var: Box::new(ClassId(ClassIdExpr {
 																			cls: cls.clone()
@@ -1960,12 +1971,25 @@ impl Visitor for DecafTreeBuilder {
 																		method,
 																		args: arg_exprs,
 																	})))
-																}
-																else {
-																	Err(ENoCompatibleMethod(id.clone()))
-																}
+
+																},
+																None => Err(ENoCompatibleMethod(format!("point A: {}", id.clone())))
+															}
+														}
+													}
+													true => {
+														println!("========trying to find static method \"{}\"======", id);
+														match cls.get_compatible_level0_static_method(&arg_exprs, id) {
+															Some(method) => {
+																Ok(ExprNode(MethodCall(MethodCallExpr {
+																	var: Box::new(ClassId(ClassIdExpr {
+																		cls: cls.clone()
+																	})),
+																	method,
+																	args: arg_exprs,
+																})))
 															},
-															None => Err(ENoCompatibleMethod(id.clone()))
+															None => Err(ENoCompatibleMethod(format!("point B: {}", id.clone())))
 														}
 													}
 												}
@@ -1974,26 +1998,33 @@ impl Visitor for DecafTreeBuilder {
 												Some(CtorScope(ctor)) => {
 													match cls.get_compatible_level0_method(&arg_exprs, id) {
 														Some(method) => {
-															if method.name == *id {
+															Ok(ExprNode(MethodCall(MethodCallExpr {
+																var: Box::new({
+																	match self.visit_this() {
+																		Ok(ExprNode(this_expr)) => match this_expr {
+																			This(_) => this_expr,
+																			_ => return Err(EThisNotFound),
+																		},
+																		_ => return Err(EExprNodeNotFound(format!("CallSelfMethod in ctor {}", id)))
+																	}
+																}),
+																method,
+																args: arg_exprs,
+															})))
+
+														},
+														None => match cls.get_compatible_level0_static_method(&arg_exprs, id) {
+															Some(method) => {
 																Ok(ExprNode(MethodCall(MethodCallExpr {
-																	var: Box::new({
-																		match self.visit_this() {
-																			Ok(ExprNode(this_expr)) => match this_expr {
-																				This(_) => this_expr,
-																				_ => return Err(EThisNotFound),
-																			},
-																			_ => return Err(EExprNodeNotFound(format!("CallSelfMethod in ctor {}", id)))
-																		}
-																	}),
+																	var: Box::new(ClassId(ClassIdExpr {
+																		cls: cls.clone()
+																	})),
 																	method,
 																	args: arg_exprs,
 																})))
-															}
-															else {
-																Err(ENoCompatibleMethod(id.clone()))
-															}
-														},
-														None => Err(ENoCompatibleMethod(id.clone()))
+															},
+															None => Err(ENoCompatibleMethod(format!("point C: {}", id.clone())))
+														}
 													}
 												}
 												_ => Err(EMethodCallWithoutMethod)
@@ -2004,7 +2035,7 @@ impl Visitor for DecafTreeBuilder {
 									_ => Err(EMethodCallWithoutClass),
 								}
 							}
-							_ => Err(EVecExprNotFound)
+							_ => Err(EVecExprNotFound(format!("CallSelfMethod {}", id)))
 						}
 					}
 					CallMethod(nprim, id, args) => {
@@ -2076,7 +2107,8 @@ impl Visitor for DecafTreeBuilder {
 									_ => Err(EExprNodeNotFound(format!("{}", id)))
 								}
 							}
-							_ => Err(EVecExprNotFound)
+							Ok(_) => Err(EVecExprNotFound(format!("CallMethod {}", id))),
+							Err(e) => Err(e),
 						}
 					}
 					CallSuper(id, args) => {
@@ -2087,23 +2119,30 @@ impl Visitor for DecafTreeBuilder {
 									Some(ClassScope(cls)) => {
 										match cls.get_compatible_level0_super_method(&arg_exprs, id) {
 											Some(method) => {
-												if method.name == *id {
-													Ok(ExprNode(SuperCall(SuperCallExpr {
-														cls: cls.clone(),
+												Ok(ExprNode(SuperCall(SuperCallExpr {
+													cls: cls.clone(),
+													method,
+													args: arg_exprs,
+												})))
+											},
+											None => match cls.get_compatible_level0_super_static_method(&arg_exprs, id) {
+												Some(method) => {
+													Ok(ExprNode(MethodCall(MethodCallExpr {
+														var: Box::new(ClassId(ClassIdExpr {
+															cls: cls.clone()
+														})),
 														method,
 														args: arg_exprs,
 													})))
-												} else {
-													Err(ENoCompatibleMethod(id.clone()))
-												}
-											},
-											None => Err(ENoCompatibleMethod(id.clone()))
+												},
+												None => Err(ENoCompatibleMethod(id.clone()))
+											}
 										}
 									}
 									Some(_) | None => Err(ESuperCallWithoutClass)
 								}
 							},
-							Ok(_) => Err(EVecExprNotFound),
+							Ok(_) => Err(EVecExprNotFound(format!("CallSuper {}", id))),
 							Err(e) => Err(e)
 						}
 					}
@@ -2220,7 +2259,7 @@ impl Visitor for DecafTreeBuilder {
 															if ty.array_lvl > 0 {
 																if id == "length" {
 																	// Only field "length"
-																	let fld = Rc::new(decaf::Field::new("length".into()));
+																	let fld = Rc::new(decaf::Field::new("length".into(), None));
 																	fld.set_base_type(Rc::new(decaf::Type {
 																		base: IntTy,
 																		array_lvl: 0
@@ -2252,7 +2291,7 @@ impl Visitor for DecafTreeBuilder {
 								// NOTE: this implies that hidden fields will never be accessed even in this scenario
 								match self.get_top_most_class_scope() {
 									Some(ClassScope(cls)) => {
-										match cls.get_level0_field_by_name(id) {
+										match cls.get_level0_super_field_by_name(id) {
 											Some(fld) => Ok(ExprNode(FieldAccess(FieldAccessExpr {
 												var: Box::new({
 													match self.visit_this() {

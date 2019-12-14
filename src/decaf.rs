@@ -990,15 +990,17 @@ impl Scope {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Field {
 	pub name: String,
+	pub cls: RefCell<Option<Rc<Class>>>,
 	pub ty: RefCell<Rc<Type>>,
 	pub init_expr: RefCell<Option<Expr>>,
 	pub refcount: RefCell<u32>,
 }
 
 impl Field {
-	pub fn new(name: String) -> Field {
+	pub fn new(name: String, cls: Option<Rc<Class>>) -> Field {
 		Self {
 			name,
+			cls: RefCell::new(cls),
 			ty: RefCell::new(Rc::new(Type {
 				base: TypeBase::UnknownTy("Unknown".to_string()),
 				array_lvl: 0,
@@ -1238,9 +1240,12 @@ impl Class {
 
 	pub fn get_field_index(&self, field: &Rc<Field>) -> Option<u32> {
 		let mut base = 0;
+		let fld_cls = field.cls.borrow().clone().unwrap();
+		let fld_cls_name = &fld_cls.name;
 
 		match self.sup_pub_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+			let f_cls_name = &f.cls.borrow().clone().unwrap().name;
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true) && f_cls_name.clone() == fld_cls_name.clone()
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -1251,7 +1256,8 @@ impl Class {
 		};
 
 		match self.sup_prot_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+			let f_cls_name = &f.cls.borrow().clone().unwrap().name;
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true) && f_cls_name.clone() == fld_cls_name.clone()
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -1265,7 +1271,8 @@ impl Class {
 		base += self.sup_priv_fields.borrow().len() as u32;
 
 		match self.pub_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+			let f_cls_name = &f.cls.borrow().clone().unwrap().name;
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true) && f_cls_name.clone() == fld_cls_name.clone()
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -1276,7 +1283,8 @@ impl Class {
 		};
 
 		match self.prot_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+			let f_cls_name = &f.cls.borrow().clone().unwrap().name;
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true) && f_cls_name.clone() == fld_cls_name.clone()
 		}) {
 			Some(ix) => {
 				return Some(ix as u32 + base);
@@ -1287,7 +1295,8 @@ impl Class {
 		};
 
 		match self.priv_fields.borrow().iter().position(|f| {
-			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+			let f_cls_name = &f.cls.borrow().clone().unwrap().name;
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true) && f_cls_name.clone() == fld_cls_name.clone()
 		}) {
 			Some(ix) => Some(ix as u32 + base),
 			None => None
@@ -1603,6 +1612,38 @@ impl Class {
 		}
 	}
 
+	pub fn get_compatible_level0_super_static_method(&self, args: &Vec<Expr>, name: &str) -> Option<Rc<Method>> {
+		let tys: Vec<Type> = args.iter().map(|e| e.get_type()).collect();
+
+		let go = |methods: &Vec<Rc<Method>>| {
+			'outer: for method in methods.iter().rev() {
+				if method.name != name || method.args.borrow().len() != args.len() {
+					continue;
+				}
+				for (arga, ty) in method.args.borrow().iter().zip(tys.iter()) {
+					if !ty.is_compatible_with(arga.1.as_ref(), false) {
+						continue 'outer;
+					}
+				}
+				return Some(method.clone());
+			}
+			None
+		};
+
+		match &*self.sup.borrow() {
+			None => None,
+			Some(sup_cls) => {
+				match go(&sup_cls.pub_static_methods.borrow()) {
+					Some(m) => Some(m),
+					None => match go(&sup_cls.prot_static_methods.borrow()) {
+						Some(m) => Some(m),
+						None => None,
+					}
+				}
+			}
+		}
+	}
+
 	pub fn get_level0_field_by_name(&self, name: &str) -> Option<Rc<Field>> {
 		match self.pub_fields.borrow().iter().find(|f| f.name == name) {
 			Some(f) => Some(f.clone()),
@@ -1618,6 +1659,16 @@ impl Class {
 						}
 					}
 				}
+			}
+		}
+	}
+
+	pub fn get_level0_super_field_by_name(&self, name: &str) -> Option<Rc<Field>> {
+		match self.sup_pub_fields.borrow().iter().find(|f| f.name == name) {
+			Some(f) => Some(f.clone()),
+			None => match self.sup_prot_fields.borrow().iter().find(|f| f.name == name) {
+				Some(f) => Some(f.clone()),
+				None => None
 			}
 		}
 	}
