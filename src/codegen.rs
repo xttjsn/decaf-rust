@@ -494,9 +494,11 @@ impl CodeGenerator {
 		for scope in self.scopes.iter().rev() {
 			match scope {
 				CtorScope(func_scope) => {
+                    println!("getting function by name: {}", &func_scope.llvm_name());
 					return self.get_function_by_name(&func_scope.llvm_name());
 				}
 				MethodScope(func_scope) => {
+                    println!("getting function by name: {}", &func_scope.llvm_name());
 					return self.get_function_by_name(&func_scope.llvm_name());
 				}
 				_ => continue,
@@ -573,8 +575,10 @@ impl CodeGenerator {
                             println!("trying to cast src_ty: {} to dst_ty: {}", src_ty, dst_ty);
                             println!("src_llvm_ty: ");
                             LLVMDumpType(src_llvm_ty); println!(" ");
+                            println!("src_llvm_ty address space: {}", LLVMGetPointerAddressSpace(src_llvm_ty));
                             println!("dst_llvm_ty: ");
                             LLVMDumpType(dst_llvm_ty); println!(" ");
+                            println!("dst_llvm_ty address space: {}", LLVMGetPointerAddressSpace(dst_llvm_ty));
 //                            let casted_addr = LLVMBuildAlloca(
 //                                self.builder,
 //                                dst_llvm_ty,
@@ -1146,6 +1150,9 @@ impl CodeGenRc for decaf::Class {
                 // Define LLVM struct type for class
                 let mut field_llvm_types: Vec<LLVMTypeRef> = vec![vtable_ptr_ty];
                 let mut all_fields = vec![];
+                all_fields.extend(self.sup_pub_fields.borrow().clone());
+                all_fields.extend(self.sup_prot_fields.borrow().clone());
+                all_fields.extend(self.sup_priv_fields.borrow().clone());
                 all_fields.extend(self.pub_fields.borrow().clone());
                 all_fields.extend(self.prot_fields.borrow().clone());
                 all_fields.extend(self.priv_fields.borrow().clone());
@@ -1201,7 +1208,8 @@ impl CodeGenRc for decaf::Class {
                             if !generator.has_function(&method.llvm_name()) {
                                 let method_ty;
                                 let method_val;
-                                let mut args = vec![ptr_of!(cls_llvm_type.clone())]; // The "this" reference
+                                let possibly_super_cls_llvm_type = generator.get_llvm_type_by_name(&method.cls.borrow().name).unwrap();
+                                let mut args = vec![ptr_of!(possibly_super_cls_llvm_type.clone())]; // The "this" reference
                                 for (_, arg_ty) in method.args.borrow().iter() {
                                     args.push(generator.ptr_if_class_or_array(arg_ty));
                                 }
@@ -1802,53 +1810,55 @@ impl CodeGen for decaf::Stmt {
                 match generator.get_top_most_function_val() {
                     Some(func_val) => {
                         // This must be in a ctor, verified by the semantic checking process
-                        unsafe {
-                            // Get this reference
-                            let this_ref = LLVMGetFirstParam(func_val);
+                        let child_cls = generator.get_top_most_class().unwrap();
+						let cls = stmt.sup.clone();
+						let cls_name = cls.name.clone();
+						let ctor = stmt.sup_ctor.clone();
+                        let args = &stmt.args;
+                        match generator.get_function_by_name(&ctor.llvm_name()) {
+                            Some(ctor_func_val) => {
 
-                            // Cast this
-                            let cls = generator.get_top_most_class().unwrap();
-                            let ty = (&cls).into();
-                            let sup = cls.sup.borrow().clone().unwrap();
-                            let sup_ty = (&sup).into();
+                                // Allocate first
+                                let mut this;
+                                unsafe {
+                                    this = LLVMGetFirstParam(func_val);
+                                    this = generator.cast_value(&(&child_cls).into(), &(&cls).into(), this);
+                                }
 
-                            let this_ref = generator.cast_value(&ty, &sup_ty, this_ref);
+                                let mut arg_vals = vec![this];
+                                for (ix, arg) in args.iter().enumerate() {
+                                    match arg.gencode(generator)? {
+                                        CodeValue::Value(arg_val) => {
+                                            // Type casting
+                                            let arg_llvm_val = arg_val.get_value(generator);
+                                            let casted_val = generator.cast_value(&arg_val.get_type(),  // source type
+                                                                                  &ctor.args.borrow()[ix].1.as_ref(), // destination type
+                                                                                  arg_llvm_val // source value
+                                            );
 
-                            // Evaluate arguments
-                            let mut arg_vals = vec![this_ref];
-                            for arg in stmt.args.iter() {
-                                match arg.gencode(generator)? {
-                                    CodeValue::Value(val) => {
-                                        arg_vals.push(val.get_value(generator));
-                                    }
-                                    _ => {
-                                        return Err(EValueNotFound(format!("{}", arg)));
+                                            arg_vals.push(casted_val);
+                                        }
+                                        _ => {
+                                            return Err(EValueNotFound(format!("{}", arg)));
+                                        }
                                     }
                                 }
-                            }
-                            let len = arg_vals.len();
-                            match generator.get_function_by_name(&stmt.sup_ctor.llvm_name()) {
-                                Some(ctor_val) => {
-
-                                    println!("calling ctor: {}\nit has type:", stmt.sup_ctor.llvm_name());
-                                    LLVMDumpType(LLVMTypeOf(ctor_val));
-                                    println!("argument has type:");
-                                    for val in arg_vals.iter() {
-                                        LLVMDumpType(LLVMTypeOf(*val));
-                                    }
-
-                                    LLVMBuildCall(generator.builder,
-                                                  ctor_val,
-                                                  params!(arg_vals),
-                                                  len as u32,
-                                                  generator.next_name(
-                                                      &format!("function_call_{}",
-                                                               stmt.sup_ctor.llvm_name())));
-                                    println!("ctor called");
-                                    Ok(OK)
+                                unsafe {
+                                    Ok(CodeValue::Value(Val(
+                                        decaf::Type {
+                                            base: ClassTy(cls.clone()),
+                                            array_lvl: 0,
+                                        },
+                                        LLVMBuildCall(
+                                            generator.builder,
+                                            ctor_func_val,
+                                            arg_vals.as_slice().as_ptr() as *mut _,
+                                            arg_vals.len() as u32,
+                                            generator.next_name(&format!("ctor_{}", &cls_name)),
+                                        ))))
                                 }
-                                None => Err(EFunctionNotFound(stmt.sup_ctor.llvm_name()))
                             }
+                            None => Err(EFunctionNotFound(ctor.llvm_name()))
                         }
                     }
                     None => Err(EBlockNotInFunction(format!("{}", self)))
@@ -2416,6 +2426,8 @@ impl CodeGen for decaf::Expr {
                     Some(func_val) => {
                         let cls = generator.get_top_most_class().unwrap();
                         unsafe {
+                            println!("This LLVMType of self of \"this\" of {} is", cls.name);
+                            LLVMDumpType(LLVMTypeOf(LLVMGetFirstParam(func_val)));
                             Ok(CodeValue::Value(Val((&cls).into(), LLVMGetFirstParam(func_val))))
                         }
                     }
@@ -2459,6 +2471,7 @@ impl CodeGen for decaf::Expr {
                                     );
                                     // Store virtual table pointer
                                     let virtual_table_val = generator.get_global_by_name(&vtable_name!(expr.cls.name)).unwrap();
+                                    println!("CreateObject: LLVMBuildGEP");
                                     let virtual_table_addr = LLVMBuildGEP(
                                         generator.builder,
                                         this,
@@ -2466,6 +2479,7 @@ impl CodeGen for decaf::Expr {
                                         2,
                                         generator.next_name(&format!("get_vtable_addr_{}", &expr.cls.name))
                                     );
+                                    println!("CreateObject: LLVMBuildStore");
                                     LLVMBuildStore(
                                         generator.builder,
                                         virtual_table_val,
@@ -2602,6 +2616,7 @@ impl CodeGen for decaf::Expr {
 
                                     println!("trying to gep vtable_ptr_addr");
                                     LLVMDumpType(LLVMTypeOf(this_ref));
+                                    println!("MethodCall: LLVMBuildGEP vtable_ptr_addr");
                                     let virtual_table_ptr_addr = LLVMBuildGEP(
                                         generator.builder,
                                         this_ref,
@@ -2616,6 +2631,7 @@ impl CodeGen for decaf::Expr {
                                         generator.next_name(&format!("load_vtable_ptr_{}", &cls.name))
                                     );
                                     println!("trying to gep func_addr");
+                                    println!("MethodCall: LLVMBuildGEP func_addr");
                                     let func_addr = LLVMBuildGEP(
                                         generator.builder,
                                         virtual_table_ptr,
@@ -2754,6 +2770,7 @@ impl CodeGen for decaf::Expr {
                                 let idx_llvm_val = idx_val.get_value(generator);
                                 // Get pointer
                                 unsafe {
+                                    println!("Array Access: LLVMBuildGEP array_inner_addr");
                                     let array_inner_addr = LLVMBuildGEP(
                                         generator.builder,
                                         array_llvm_val,
@@ -2766,6 +2783,7 @@ impl CodeGen for decaf::Expr {
                                         array_inner_addr,
                                         generator.next_name("load_array_inner")
                                     );
+                                    println!("Array Access: LLVMBuildGEP val_addr");
                                     let val_addr = LLVMBuildGEP(
                                         generator.builder,
                                         array_inner,
@@ -2820,6 +2838,10 @@ impl CodeGen for decaf::Expr {
                             };
 
                             unsafe {
+                                println!("Field Access: LLVMBuildGEP in {}", self);
+                                println!("field_idx: {}", field_idx);
+                                println!("LLVMTypeOf(obj_val)=");
+                                LLVMDumpType(LLVMTypeOf(obj_val));
                                 let field_addr = LLVMBuildGEP(
                                     generator.builder,
                                     obj_val,

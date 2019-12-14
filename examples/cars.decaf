@@ -4,7 +4,8 @@ class Car {
   private String model;
 
   public Car(String b, String m)
-  {    builder = b;
+  {
+    builder = b;
     model = m;
   }
 

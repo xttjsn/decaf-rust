@@ -1029,6 +1029,9 @@ pub struct Class {
 	pub pub_fields: RefCell<Vec<Rc<Field>>>,
 	pub prot_fields: RefCell<Vec<Rc<Field>>>,
 	pub priv_fields: RefCell<Vec<Rc<Field>>>,
+	pub sup_pub_fields: RefCell<Vec<Rc<Field>>>,
+	pub sup_prot_fields: RefCell<Vec<Rc<Field>>>,
+	pub sup_priv_fields: RefCell<Vec<Rc<Field>>>,
 	pub pub_ctors: RefCell<Vec<Rc<Ctor>>>,
 	pub prot_ctors: RefCell<Vec<Rc<Ctor>>>,
 	pub priv_ctors: RefCell<Vec<Rc<Ctor>>>,
@@ -1091,6 +1094,9 @@ impl Class {
 			pub_fields: RefCell::new(vec![]),
 			prot_fields: RefCell::new(vec![]),
 			priv_fields: RefCell::new(vec![]),
+			sup_pub_fields: RefCell::new(vec![]),
+			sup_prot_fields: RefCell::new(vec![]),
+			sup_priv_fields: RefCell::new(vec![]),
 			pub_ctors: RefCell::new(vec![]),
 			prot_ctors: RefCell::new(vec![]),
 			priv_ctors: RefCell::new(vec![]),
@@ -1163,11 +1169,9 @@ impl Class {
 		*self.sup.borrow_mut() = Some(supr.clone());
 
 		// Inherit public fields
-		let pub_fields = prepend(&self.pub_fields.borrow()[..], &supr.pub_fields.borrow()[..]);
-		*self.pub_fields.borrow_mut() = pub_fields;
-
-		let prot_fields = prepend(&self.prot_fields.borrow()[..], &supr.prot_fields.borrow()[..]);
-		*self.prot_fields.borrow_mut() = prot_fields;
+		*self.sup_pub_fields.borrow_mut() = supr.pub_fields.borrow().clone();
+		*self.sup_prot_fields.borrow_mut() = supr.prot_fields.borrow().clone();
+		*self.sup_priv_fields.borrow_mut() = supr.priv_fields.borrow().clone();
 
 		// Inherit public methods
 		for supr_pub_method in supr.pub_methods.borrow().iter() {
@@ -1198,23 +1202,68 @@ impl Class {
 			}
 		}
 
-		for field in self.priv_fields.borrow().iter() {
-			if field.name == *name {
-				return Some(field.clone())
-			}
-		}
-
 		for field in self.prot_fields.borrow().iter() {
 			if field.name == *name {
 				return Some(field.clone())
 			}
 		}
 
+		for field in self.priv_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		for field in self.sup_pub_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		for field in self.sup_prot_fields.borrow().iter() {
+			if field.name == *name {
+				return Some(field.clone())
+			}
+		}
+
+		// Private field is invisible to class
+//		for field in self.priv_fields.borrow().iter() {
+//			if field.name == *name {
+//				return Some(field.clone())
+//			}
+//		}
+
 		None
 	}
 
 	pub fn get_field_index(&self, field: &Rc<Field>) -> Option<u32> {
 		let mut base = 0;
+
+		match self.sup_pub_fields.borrow().iter().position(|f| {
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+		}) {
+			Some(ix) => {
+				return Some(ix as u32 + base);
+			}
+			None => {
+				base += self.sup_pub_fields.borrow().len() as u32;
+			}
+		};
+
+		match self.sup_prot_fields.borrow().iter().position(|f| {
+			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
+		}) {
+			Some(ix) => {
+				return Some(ix as u32 + base);
+			}
+			None => {
+				base += self.sup_prot_fields.borrow().len() as u32;
+			}
+		};
+
+		// To account for private fields
+		base += self.sup_priv_fields.borrow().len() as u32;
+
 		match self.pub_fields.borrow().iter().position(|f| {
 			f.name == field.name && f.ty.borrow().is_compatible_with(&field.ty.borrow(), true)
 		}) {
@@ -1559,7 +1608,16 @@ impl Class {
 			Some(f) => Some(f.clone()),
 			None => match self.prot_fields.borrow().iter().find(|f| f.name == name) {
 				Some(f) => Some(f.clone()),
-				None => None
+				None => match self.priv_fields.borrow().iter().find(|f| f.name == name) {
+					Some(f) => Some(f.clone()),
+					None => match self.sup_pub_fields.borrow().iter().find(|f| f.name == name) {
+						Some(f) => Some(f.clone()),
+						None => match self.sup_prot_fields.borrow().iter().find(|f| f.name == name) {
+							Some(f) => Some(f.clone()),
+							None => None  // Super's private field is not accessible
+						}
+					}
+				}
 			}
 		}
 	}
@@ -1567,7 +1625,10 @@ impl Class {
 	pub fn get_level1_field_by_name(&self, name: &str) -> Option<Rc<Field>> {
 		match self.pub_fields.borrow().iter().find(|f| f.name == name) {
 			Some(f) => Some(f.clone()),
-			None => None,
+			None => match self.sup_pub_fields.borrow().iter().find(|f| f.name == name) {
+				Some(f) => Some(f.clone()),
+				None => None,
+			},
 		}
 	}
 }
