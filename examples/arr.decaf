@@ -1,0 +1,8 @@
+
+class Checker {
+public static void main ( String[] argv ) {
+   int[][][] matrix = new int[10][20][30];
+   matrix[0][1][2] = 10;
+   IO.putInt(matrix[0][1][2]);
+}
+}

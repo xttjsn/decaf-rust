@@ -12,7 +12,7 @@ class Hello {
     IO.putString ("s");
 	int x = IO.getInt();
     int y = IO.getInt ();
-	if(dx < 0){ int dx = -dx; };
+	if(x < 0){ x = -x; };
 	IO.putInt (x);
 	IO.putInt (y);
   }

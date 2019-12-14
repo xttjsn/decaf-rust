@@ -97,6 +97,8 @@ class OperatorArray
     {
       return this.subtraction.toChar ();
     }
+
+    return 0;
   }
 }
 
@@ -111,7 +113,7 @@ class Permutations
 
   private void fillThree ()
   {
-    three = new int [ 3 ] [ 3 ];
+    three = new int [ 6 ] [ 3 ];
 
     three [ 0 ] [ 0 ] = 0;
     three [ 0 ] [ 1 ] = 1;

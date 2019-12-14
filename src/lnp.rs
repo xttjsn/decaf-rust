@@ -25,7 +25,7 @@ pub mod lexer {
 					Some('n') => Ok('\n'),
 					Some('\\') => Ok('\\'),
 					Some('t') => Ok('\t'),
-					Some(c) => Err(TokenError::InvalidEscapedChar(c)),
+					Some(c) => Ok(c),
 				}
 				c => Ok(c)
 			})

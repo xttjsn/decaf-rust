@@ -24,7 +24,7 @@ class Integer {
 
 class ListElement {
     public Object elem;
-    public Object next;
+    public ListElement next; // Corrected
 
     public ListElement(Object o) {
         elem = o;

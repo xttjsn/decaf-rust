@@ -5,7 +5,7 @@ use crate::lnp;
 
 use llvm_sys::prelude::*;
 use lnp::past::{BinOp, UnOp};
-use crate::decaf::TypeBase::ClassTy;
+use crate::decaf::TypeBase::{ClassTy, VoidTy};
 use crate::codegen::LLVMName;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -248,6 +248,10 @@ impl Type {
 										// Only allow such cast if they are scalars (i.e. non array)
 										self.array_lvl == 0
 									},
+									(ClassTy(_), IntTy) | (IntTy, ClassTy(_)) => {
+										// Only allow such cast if they are scalars (i.e. non array)
+										self.array_lvl == 0
+									}
 									_ => false
 								}
 							}
@@ -317,6 +321,21 @@ pub enum TypeBase {
 	VoidTy,
 	NULLTy,
 	ClassTy(Rc<Class>),
+}
+
+impl TypeBase {
+	pub fn is_class(&self) -> bool {
+		match self {
+			ClassTy(_) => true,
+			_ => false,
+		}
+	}
+	pub fn get_class(&self) -> Option<Rc<Class>> {
+		match self {
+			ClassTy(cls) => Some(cls.clone()),
+			_ => None,
+		}
+	}
 }
 
 impl PartialEq for TypeBase {
@@ -601,7 +620,7 @@ impl ControlFlow for Stmt {
 			While(_) => None, // We don't know at compile time if while body will be executed at all
 			Return(stmt)=> {
 				match &stmt.expr {
-					None => None,
+					None => Some(Type{base: VoidTy, array_lvl: 0}),
 					Some(expr) => Some(expr.get_type())
 				}
 			}
@@ -609,7 +628,17 @@ impl ControlFlow for Stmt {
 			Break(_) => None,
 			Super(_) => None,
 			Block(blkstmt) => {
-				blkstmt.stmts.borrow().iter().rev().find_map(|stmt| stmt.returnable())
+				for stmt in blkstmt.stmts.borrow().iter().rev() {
+					match stmt.returnable() {
+						Some(t) => {
+							println!("{} is returnable", stmt);
+							return Some(t);
+						}
+						None => continue,
+					}
+				}
+				None
+//				blkstmt.stmts.borrow().iter().rev().find_map(|stmt| stmt.returnable())
 			}
 		}
 	}
@@ -913,7 +942,7 @@ impl Scope {
 			// TODO: implement fields
 			ClassScope(_) | WhileScope(_) | GlobalScope => None,
 			MethodScope(mthd) => {
-				for v in mthd.vartbl.borrow().iter() {
+				for v in mthd.vartbl.borrow().iter().rev() {
 					if v.name == name {
 						return Some(v.clone());
 					}
@@ -921,7 +950,7 @@ impl Scope {
 				None
 			}
 			CtorScope(ctor) => {
-				for v in ctor.vartbl.borrow().iter() {
+				for v in ctor.vartbl.borrow().iter().rev() {
 					if v.name == name {
 						return Some(v.clone());
 					}
@@ -929,7 +958,7 @@ impl Scope {
 				None
 			}
 			BlockScope(blk) => {
-				for v in blk.vartbl.borrow().iter() {
+				for v in blk.vartbl.borrow().iter().rev() {
 					if v.name == name {
 						return Some(v.clone());
 					}
@@ -1111,6 +1140,15 @@ impl Class {
 			local_methods: RefCell::new(vec![]),
 			vtable: RefCell::new(vec![]),
 		}
+	}
+
+	pub fn get_default_ctor(&self) -> Rc<Ctor> {
+		for ctor in self.pub_ctors.borrow().iter() {
+			if ctor.args.borrow().len() == 0 {
+				return ctor.clone();
+			}
+		}
+		panic!("no default ctor found")
 	}
 
 	pub fn check_pub_method_defined_as_nonpub(&self, supr_pub_method: &Rc<Method>) -> Result<(), &'static str> {
@@ -1305,8 +1343,8 @@ impl Class {
 
 	pub fn get_method_by_signature(&self, return_ty: &TypeBase, array_lvl: u32,
 								   args: &Vec<(String, TypeBase, u32)>, is_static: bool, name: &str) -> Option<Rc<Method>> {
-		println!("get_method_by_signature: \n return_ty: {:?}\n array_lvl: {}\n is_static: {}",
-				 return_ty,
+		println!("get_method_by_signature: \n return_ty: {}\n array_lvl: {}\n is_static: {}",
+				 Type::from(return_ty),
 				 array_lvl,
 				 is_static);
 		let go = |methods: &Vec<Rc<Method>>| {

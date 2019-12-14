@@ -403,35 +403,46 @@ impl CodeGenerator {
 
     fn get_llvm_type_from_decaf_type(&self, ty: &decaf::Type) -> LLVMTypeRef {
         use decaf::TypeBase::*;
-        let base_llvm_ty = match &ty.base {
+        let (base_llvm_ty, is_class) = match &ty.base {
             UnknownTy(name) => {
                 panic!("unknown type : {}", name);
             }
-            BoolTy => self.bool_type(),
-            IntTy => self.int_type(),
-            CharTy => self.char_type(),
+            BoolTy => (self.bool_type(), false),
+            IntTy => (self.int_type(), false),
+            CharTy => (self.char_type(), false),
             StrTy => panic!("StrTy shouldn't be looked up"),
-            VoidTy => self.void_type(),
-            NULLTy => self.char_ptr_type(),
+            VoidTy => (self.void_type(), false),
+            NULLTy => (self.char_ptr_type(), false),
             ClassTy(cls) => {
-                self.get_llvm_type_by_name(&cls.name).unwrap()
+                (self.get_llvm_type_by_name(&cls.name).unwrap(), true)
             }
         };
 
         if ty.array_lvl == 0 {
             base_llvm_ty
         } else {
-            let mut curr_ty= base_llvm_ty;
+            let mut curr_ty;
             unsafe {
+                curr_ty= if is_class {
+                    ptr_of!(base_llvm_ty)
+                } else {
+                    base_llvm_ty
+                };
                 let mut lvl = ty.array_lvl;
+                let mut loopcount = 0;
                 loop {
-                    curr_ty = LLVMPointerType(base_llvm_ty, ADDRESS_SPACE_GENERIC);
+                    curr_ty = if loopcount > 0 {
+                        ptr_of!(ptr_of!(curr_ty))
+                    } else {
+                        ptr_of!(curr_ty)
+                    };
                     let mut field_types = [curr_ty, self.int_type()];
                     curr_ty = LLVMStructType((&mut field_types[0]) as *mut _, 2, 0);
                     lvl -= 1;
                     if lvl == 0 {
                         break
                     }
+                    loopcount += 1;
                 }
             }
             curr_ty
@@ -555,69 +566,74 @@ impl CodeGenerator {
 
 	fn cast_value(&mut self, src_ty: &decaf::Type, dst_ty: &decaf::Type, val: LLVMValueRef) -> LLVMValueRef {
         println!("casting value");
-		// Only cast pointer type
-		if src_ty.is_compatible_with(dst_ty, false) {
-			let is_ptr = {
-				if src_ty.array_lvl > 0 {
-					true
-				} else if let ClassTy(_) = src_ty.base {
-					true
-				} else {
-					false
-				}
-			};
-			if is_ptr {
-				if src_ty.array_lvl == dst_ty.array_lvl {
-					if src_ty.base != dst_ty.base {
-                        unsafe {
-                            let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
-                            let src_llvm_ty = self.ptr_if_class_or_array(src_ty);
-                            println!("trying to cast src_ty: {} to dst_ty: {}", src_ty, dst_ty);
-                            println!("src_llvm_ty: ");
-                            LLVMDumpType(src_llvm_ty); println!(" ");
-                            println!("src_llvm_ty address space: {}", LLVMGetPointerAddressSpace(src_llvm_ty));
-                            println!("dst_llvm_ty: ");
-                            LLVMDumpType(dst_llvm_ty); println!(" ");
-                            println!("dst_llvm_ty address space: {}", LLVMGetPointerAddressSpace(dst_llvm_ty));
-//                            let casted_addr = LLVMBuildAlloca(
-//                                self.builder,
-//                                dst_llvm_ty,
-//                                self.next_name(&format!("cast_{}_{}", src_ty, dst_ty))
-//                            );
-//                            let casted_val = LLVMBuildBitCast(
-//                                self.builder,
-//                                val,
-//                                dst_llvm_ty,
-//                                self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)));
-//                            LLVMBuildStore(
-//                                self.builder,
-//                                casted_val,
-//                                casted_addr
-//                            );
-//                            LLVMBuildLoad(
-//                                self.builder,
-//                                casted_addr,
-//                                self.next_name(&format!("load_casted_value"))
-//                            )
-                            LLVMBuildBitCast(
-                                self.builder,
-                                val,
-                                dst_llvm_ty,
-                                self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
+        unsafe {
+            let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
+            let src_llvm_ty = self.ptr_if_class_or_array(src_ty);
+            println!("testing trying to  cast src_ty: {} to dst_ty: {}", src_ty, dst_ty);
+            println!("src_llvm_ty: ");
+            LLVMDumpType(src_llvm_ty);
+            println!(" ");
+            println!("src_llvm_ty address space: {}", LLVMGetPointerAddressSpace(src_llvm_ty));
+            println!("dst_llvm_ty: ");
+            LLVMDumpType(dst_llvm_ty);
+            println!(" ");
+            println!("dst_llvm_ty address space: {}", LLVMGetPointerAddressSpace(dst_llvm_ty));
+            // Only cast pointer type
+            if src_ty.is_compatible_with(dst_ty, false) {
+                let is_ptr = {
+                    if src_ty.array_lvl > 0 {
+                        true
+                    } else if let ClassTy(_) = src_ty.base {
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if is_ptr {
+                    if src_ty.array_lvl == dst_ty.array_lvl {
+                        if src_ty.base != dst_ty.base {
+                            match (&src_ty.base, &dst_ty.base) {
+                                (IntTy, ClassTy(_)) => {
+                                    println!("build int to ptr\n");
+                                    std::process::exit(2);
+                                    LLVMBuildIntToPtr(
+                                        self.builder,
+                                        val,
+                                        dst_llvm_ty,
+                                        self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
+                                }
+                                (ClassTy(_), IntTy) => {
+                                    println!("build ptr to int\n");
+                                    std::process::exit(1);
+                                    LLVMBuildPtrToInt(
+                                        self.builder,
+                                        val,
+                                        dst_llvm_ty,
+                                        self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
+                                }
+                                _ => {
+                                    println!("build {} to {}\n", src_ty, dst_ty);
+                                    std::process::exit(3);
+                                    LLVMBuildPointerCast(
+                                        self.builder,
+                                        val,
+                                        dst_llvm_ty,
+                                        self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
+                                }
+                            }
+                        } else {
+                            println!("Types {} and {} are equal", src_ty, dst_ty);
+                            val
                         }
-					} else {
-						val
-					}
-				} else {
-					panic!("casting will change array_lvl: src_type: {}, dst_type: {}", src_ty, dst_ty);
-				}
-			} else {
-                // Primitive type cast or equal type
-                if src_ty.base == dst_ty.base {
-                    val
+                    } else {
+                        panic!("casting will change array_lvl: src_type: {}, dst_type: {}", src_ty, dst_ty);
+                    }
                 } else {
-                    let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
-                    unsafe {
+                    // Primitive type cast or equal type
+                    if src_ty.base == dst_ty.base {
+                        val
+                    } else {
+                        let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
                         LLVMBuildIntCast(
                             self.builder,
                             val,
@@ -626,10 +642,10 @@ impl CodeGenerator {
                         )
                     }
                 }
-			}
-		} else {
-			panic!("casting incompatible types. src_type: {}, dst_type: {}", src_ty, dst_ty);
-		}
+            } else {
+                panic!("casting incompatible types. src_type: {}, dst_type: {}", src_ty, dst_ty);
+            }
+        }
 	}
 
 	fn variable_lookup(&self, name: &str) -> Option<Rc<Variable>> {
@@ -725,7 +741,7 @@ impl CodeGenerator {
 			LLVMPassManagerBuilderDispose(builder);
 
 			LLVMRunPassManager(pass_manager, self.module);
-			// LLVMRunPassManager(pass_manager, self.module);
+			 LLVMRunPassManager(pass_manager, self.module);
 
 			LLVMDisposePassManager(pass_manager);
 		}
@@ -954,16 +970,62 @@ impl CodeGenerator {
 	) -> Result<(), String> {
 		// Link the object file
 		let runtime_source = r#"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#define MAX_STRING_SIZE 1000
+#include <errno.h>
+
+/* Read up to (and including) a newline from STREAM into *LINEPTR
+   (and null-terminate it). *LINEPTR is a pointer returned from malloc (or
+   NULL), pointing to *N characters of space.  It is realloc'd as
+   necessary.  Returns the number of characters read (not including the
+   null terminator), or -1 on error or EOF.  */
+
+int getline(char **lineptr, size_t *n, FILE *stream)
+{
+static char line[256];
+char *ptr;
+unsigned int len;
+
+   if (lineptr == NULL || n == NULL)
+   {
+      errno = EINVAL;
+      return -1;
+   }
+
+   if (ferror (stream))
+      return -1;
+
+   if (feof(stream))
+      return -1;
+
+   fgets(line,256,stream);
+
+   ptr = strchr(line,'\n');
+   if (ptr)
+      *ptr = '\0';
+
+   len = strlen(line);
+
+   if ((len+1) < 256)
+   {
+      ptr = realloc(*lineptr, 256);
+      if (ptr == NULL)
+         return(-1);
+      *lineptr = ptr;
+      *n = 256;
+   }
+
+   strcpy(*lineptr,line);
+   return(len);
+}
 
 struct String {
 	char* inner;
 };
 
 struct Array {
-	struct String* ptr;
+	struct String** ptr;
 	long long length;
 };
 
@@ -991,8 +1053,10 @@ char IO_getChar_inner() {
 
 char* IO_getLine_inner() {
 	// TODO: set size
-	char* line = malloc(MAX_STRING_SIZE);
-	return fgets(&line, MAX_STRING_SIZE, stdin);
+	char *line = NULL;
+	size_t sz = 0;
+	getline(&line, &sz, stdin);
+	return line;
 }
 
 long long IO_getInt_inner() {
@@ -1015,7 +1079,7 @@ int main(int argc, char** argv) {
 
 
 	struct Array arr;
-	arr.ptr = argv_strings;
+	arr.ptr = &argv_strings;
 	arr.length = argc;
 
     DECAF_MAIN(&arr);
@@ -2110,6 +2174,7 @@ impl CodeGen for decaf::Expr {
                 }
 			}
 			CreateArray(expr) => {
+                println!("====CreateArray");
                 if expr.dims.len() > 0 {
                     match generator.get_top_most_function_val() {
                         Some(func_val) => {
@@ -2129,6 +2194,14 @@ impl CodeGen for decaf::Expr {
                             let mut dim_vals = vec![];
                             let mut loop_infos = vec![];
                             let mut array_result = std::ptr::null_mut();
+                            let is_class = expr.ty.is_class();
+                            let mut cls_name = None;
+                            let mut ctor_func_val = None;
+                            if is_class {
+                                let cls = expr.ty.get_class().unwrap();
+                                cls_name = Some(cls.name.clone());
+                                ctor_func_val = Some(generator.get_function_by_name(&cls.get_default_ctor().llvm_name()).unwrap());
+                            }
 
                             let lvl = expr.dims.len() as u32;
                             for dim in expr.dims.iter() {
@@ -2169,6 +2242,12 @@ impl CodeGen for decaf::Expr {
                                             },
                                         );
 
+                                        println!("array ty:");
+                                        LLVMDumpType(ty);
+                                        println!("array inner ty:");
+                                        LLVMDumpType(ty_inner);
+
+
                                         LLVMBuildBr(generator.builder, body_bb);
                                         LLVMPositionBuilderAtEnd(generator.builder, body_bb);
                                         let dim_llvm_val = dim_val.get_value(generator);
@@ -2179,7 +2258,7 @@ impl CodeGen for decaf::Expr {
                                         );
                                         let array_inner_val = LLVMBuildArrayMalloc(
                                             generator.builder,
-                                            ty_inner,
+                                            if lvl - 1 >  0 || is_class { ptr_of!(ty_inner) } else { ty_inner },
                                             dim_llvm_val,
                                             generator.next_name("aloop_array_inner")
                                         );
@@ -2197,11 +2276,19 @@ impl CodeGen for decaf::Expr {
                                             2,
                                             generator.next_name("aloop_gep_array_sz_addr")
                                         );
+                                        println!("array_inner_val:");
+                                        LLVMDumpType(LLVMTypeOf(array_inner_val));
+                                        println!("inner_addr:");
+                                        LLVMDumpType(LLVMTypeOf(inner_addr));
                                         LLVMBuildStore(
                                             generator.builder,
                                             array_inner_val,
                                             inner_addr
                                         );
+                                        println!("dim_llvm_val:");
+                                        LLVMDumpType(LLVMTypeOf(dim_llvm_val));
+                                        println!("sz_addr:");
+                                        LLVMDumpType(LLVMTypeOf(sz_addr));
                                         LLVMBuildStore(
                                             generator.builder,
                                             dim_llvm_val,
@@ -2221,6 +2308,10 @@ impl CodeGen for decaf::Expr {
                                         };
                                         loop_infos.push(info);
                                         array_result = array_var;
+
+                                        if lvl - 1 == 0 {
+                                            LLVMBuildBr(generator.builder, next_bb);
+                                        }
                                     }
                                     else {
                                         let init_bb = LLVMAppendBasicBlockInContext(
@@ -2249,12 +2340,18 @@ impl CodeGen for decaf::Expr {
                                                 array_lvl: lvl - ix as u32
                                             },
                                         );
-                                        let inner_ty = generator.get_llvm_type_from_decaf_type(
+                                        let ty_inner = generator.get_llvm_type_from_decaf_type(
                                             &decaf::Type {
                                                 base: expr.ty.clone(),
                                                 array_lvl: lvl - ix as u32 - 1,
                                             },
                                         );
+
+                                        println!("level:{}", ix);
+                                        println!("array ty:");
+                                        LLVMDumpType(ty);
+                                        println!("array inner ty:");
+                                        LLVMDumpType(ty_inner);
 
                                         LLVMBuildBr(generator.builder, init_bb);
                                         LLVMPositionBuilderAtEnd(generator.builder, init_bb);
@@ -2312,7 +2409,7 @@ impl CodeGen for decaf::Expr {
                                         );
                                         let array_inner_val = LLVMBuildArrayMalloc(
                                             generator.builder,
-                                            inner_ty,
+                                            if (lvl - ix as u32 - 1) >  0 || is_class { ptr_of!(ty_inner) } else { ty_inner },
                                             dim_llvm_val,
                                             generator.next_name("aloop_array_inner")
                                         );
@@ -2330,11 +2427,21 @@ impl CodeGen for decaf::Expr {
                                             2,
                                             generator.next_name("aloop_gep_array_sz_addr")
                                         );
+
+                                        println!("array_inner_val:");
+                                        LLVMDumpType(LLVMTypeOf(array_inner_val));
+                                        println!("inner_addr:");
+                                        LLVMDumpType(LLVMTypeOf(inner_addr));
                                         LLVMBuildStore(
                                             generator.builder,
                                             array_inner_val,
                                             inner_addr,
                                         );
+
+                                        println!("dim_llvm_val:");
+                                        LLVMDumpType(LLVMTypeOf(dim_llvm_val));
+                                        println!("sz_addr:");
+                                        LLVMDumpType(LLVMTypeOf(sz_addr));
                                         LLVMBuildStore(
                                             generator.builder,
                                             dim_llvm_val,
@@ -2348,6 +2455,13 @@ impl CodeGen for decaf::Expr {
                                             1,
                                             generator.next_name("aloop_gep_array_elem_addr")
                                         );
+
+                                        println!("array_var:");
+                                        LLVMDumpType(LLVMTypeOf(array_var)); println!("");
+                                        println!("element_addr:");
+                                        LLVMDumpType(LLVMTypeOf(element_addr)); println!("");
+
+
                                         LLVMBuildStore(
                                             generator.builder,
                                             array_var,
@@ -2371,14 +2485,129 @@ impl CodeGen for decaf::Expr {
                                     }
                                 }
 
-                                LLVMBuildBr(
-                                    generator.builder,
+                                let real_next_bb = if is_class {
+                                    // Initialize class objects with their ctor
+                                    // for loop 0..dim_llvm_val-1
+
+                                    LLVMPositionBuilderAtEnd(generator.builder,
+                                                             loop_infos.last().unwrap().finish_bb);
+
+                                    let ty_inner = generator.get_llvm_type_from_decaf_type(
+                                        &decaf::Type {
+                                            base: expr.ty.clone(),
+                                            array_lvl: 0
+                                        },
+                                    );
+
+                                    let cls_init_bb = LLVMAppendBasicBlockInContext(
+                                        LLVMGetModuleContext(generator.module),
+                                        func_val,
+                                        generator.next_name("aloop_cls_init")
+                                    );
+                                    let cls_cond_bb = LLVMAppendBasicBlockInContext(
+                                        LLVMGetModuleContext(generator.module),
+                                        func_val,
+                                        generator.next_name("aloop_cls_cond")
+                                    );
+                                    let cls_body_bb = LLVMAppendBasicBlockInContext(
+                                        LLVMGetModuleContext(generator.module),
+                                        func_val,
+                                        generator.next_name("aloop_cls_body")
+                                    );
+                                    let cls_finish_bb = LLVMAppendBasicBlockInContext(
+                                        LLVMGetModuleContext(generator.module),
+                                        func_val,
+                                        generator.next_name("aloop_cls_finish")
+                                    );
+                                    let next_bb = LLVMAppendBasicBlockInContext(
+                                        LLVMGetModuleContext(generator.module),
+                                        func_val,
+                                        generator.next_name("aloop_cls_next")
+                                    );
+
+                                    LLVMBuildBr(generator.builder, cls_init_bb);
+                                    LLVMPositionBuilderAtEnd(generator.builder, cls_init_bb);
+                                    let control_var = LLVMBuildAlloca(
+                                        generator.builder,
+                                        generator.int_type(),
+                                        generator.next_name("aloop_cls_control_var")
+                                    );
+                                    LLVMBuildStore(
+                                        generator.builder,
+                                        generator.const_i64(0),
+                                        control_var
+                                    );
+                                    LLVMBuildBr(generator.builder, cls_cond_bb);
+
+                                    LLVMPositionBuilderAtEnd(generator.builder, cls_cond_bb);
+                                    let control_var_val = LLVMBuildLoad(
+                                        generator.builder,
+                                        control_var,
+                                        generator.next_name("aloop_cls_load_control_var")
+                                    );
+                                    let cmp_result = LLVMBuildICmp(
+                                        generator.builder,
+                                        LLVMIntSLT,
+                                        control_var_val,
+                                        loop_infos.last().unwrap().rep_count,
+                                        generator.next_name("aloop_cls_cmp_control_var")
+                                    );
+                                    LLVMBuildCondBr(
+                                        generator.builder,
+                                        cmp_result,
+                                        cls_body_bb,
+                                        next_bb
+                                    );
+
+                                    LLVMPositionBuilderAtEnd(generator.builder, cls_finish_bb);
+                                    let next_control_val = LLVMBuildAdd(
+                                        generator.builder,
+                                        control_var_val,
+                                        generator.const_i64(1),
+                                        generator.next_name("aloop_inc_control_var"),
+                                    );
+                                    LLVMBuildStore(
+                                        generator.builder,
+                                        next_control_val,
+                                        control_var
+                                    );
+                                    LLVMBuildBr(generator.builder, cls_cond_bb);
+
+                                    LLVMPositionBuilderAtEnd(generator.builder, cls_body_bb);
+                                    let obj_addr = LLVMBuildMalloc(
+                                        generator.builder,
+                                        ty_inner,
+                                        generator.next_name("aloop_cls_new")
+                                    );
+                                    // Invoke ctor
+                                    LLVMBuildCall(
+                                        generator.builder,
+                                        ctor_func_val.unwrap(),
+                                        vec![obj_addr].as_slice().as_ptr() as *mut _,
+                                        1,
+                                        generator.next_name(&format!("ctor_{}", cls_name.unwrap()))
+                                    );
+                                    let obj_addr_addr = LLVMBuildGEP(
+                                        generator.builder,
+                                        loop_infos.last().unwrap().array_inner_val,
+                                        vec![control_var_val].as_mut_slice().as_mut_ptr() as *mut _,
+                                        1,
+                                        generator.next_name("aloop_cls_addr_addr")
+                                    );
+                                    LLVMBuildStore(
+                                        generator.builder,
+                                        obj_addr,
+                                        obj_addr_addr
+                                    );
+                                    LLVMBuildBr(generator.builder, cls_finish_bb);
+                                    next_bb
+                                } else {
                                     loop_infos.first().unwrap().finish_bb
-                                );
+                                };
                                 // Reposition
                                 LLVMPositionBuilderAtEnd(
                                     generator.builder,
-                                    loop_infos.first().unwrap().finish_bb
+                                    real_next_bb
                                 );
                             }
 
@@ -2683,6 +2912,12 @@ impl CodeGen for decaf::Expr {
 
                 println!("right before calling the method: {}", expr.method);
                 unsafe {
+                    println!("func_val type:");
+                    LLVMDumpType(LLVMTypeOf(func_val));
+                    if arg_vals.len() > 0 {
+                        println!("argument[0] type:");
+                        LLVMDumpType(LLVMTypeOf(arg_vals[0]));
+                    }
                     let ret = Ok(CodeValue::Value(Val(
                         decaf::Type {
                             base: expr.method.return_ty.borrow().base.clone(),
@@ -2771,6 +3006,9 @@ impl CodeGen for decaf::Expr {
                                 // Get pointer
                                 unsafe {
                                     println!("Array Access: LLVMBuildGEP array_inner_addr");
+                                    println!("array_llvm_val:");
+                                    LLVMDumpType(LLVMTypeOf(array_llvm_val));
+
                                     let array_inner_addr = LLVMBuildGEP(
                                         generator.builder,
                                         array_llvm_val,
@@ -2778,11 +3016,18 @@ impl CodeGen for decaf::Expr {
                                         2,
                                         generator.next_name("gep_array_inner_addr")
                                     );
+                                    println!("array_inner_addr:");
+                                    LLVMDumpType(LLVMTypeOf(array_inner_addr));
+
+
                                     let array_inner = LLVMBuildLoad(
                                         generator.builder,
                                         array_inner_addr,
                                         generator.next_name("load_array_inner")
                                     );
+                                    println!("array_inner:");
+                                    LLVMDumpType(LLVMTypeOf(array_inner));
+
                                     println!("Array Access: LLVMBuildGEP val_addr");
                                     let val_addr = LLVMBuildGEP(
                                         generator.builder,
@@ -2791,6 +3036,9 @@ impl CodeGen for decaf::Expr {
                                         1,
                                         generator.next_name("gep_array_element_addr")
                                     );
+                                    println!("val_addr:");
+                                    LLVMDumpType(LLVMTypeOf(val_addr));
+
 
                                     // Make it a variable
                                     let array_elem_variable = Rc::new(Variable {
@@ -2821,53 +3069,56 @@ impl CodeGen for decaf::Expr {
                     CodeValue::Value(var_val) => {
                         let obj_val = var_val.get_value(generator);
                         let obj_ty = var_val.get_type();
-                        if let ClassTy(cls) = obj_ty.base {
-                            let (field_idx, field_ty) = {
+                        let (field_idx, field_ty, cls) = {
+                            if let ClassTy(cls) = obj_ty.base {
                                 if obj_ty.array_lvl == 0 {
                                     let field_idx = match cls.get_field_index(&expr.fld) {
                                         Some(ix) => ix,
                                         None => panic!("fail to find field index in {}", self),
                                     };
                                     let field_ty = generator.ptr_if_class_or_array(&*expr.fld.ty.borrow());
-                                    (field_idx + 1, field_ty)  // Account for vtable ptr
+                                    (field_idx + 1, field_ty, cls)  // Account for vtable ptr
                                 } else {
                                     // Array type only have "length" field
                                     assert!(expr.fld.name == "length");
-                                    (1, generator.int_type()) // Array does not have vtable ptr
+                                    (1, generator.int_type(), generator.class_lookup("Array").unwrap()) // Array does not have vtable ptr
                                 }
+                            } else {
+                                if obj_ty.array_lvl > 0 {
+                                    (1, generator.int_type(), generator.class_lookup("Array").unwrap())
+                                } else {
+                                    return Err(ENonClassNotSupportMethodCall(format!("{}", expr.var)));
+                                }
+                            }
+                        };
+                        unsafe {
+                            println!("Field Access: LLVMBuildGEP in {}", self);
+                            println!("field_idx: {}", field_idx);
+                            println!("LLVMTypeOf(obj_val)=");
+                            LLVMDumpType(LLVMTypeOf(obj_val));
+                            let field_addr = LLVMBuildGEP(
+                                generator.builder,
+                                obj_val,
+                                generator.indices(vec![0, field_idx as i64]).as_mut_slice().as_mut_ptr() as *mut _,
+                                2,
+                                generator.next_name(&format!("gep_field_addr_{}_{}", cls.name, expr.fld.name))
+                            );
+                            let field_addr_ty = ptr_of!(field_ty);
+                            let field_addr = LLVMBuildBitCast(
+                                generator.builder,
+                                field_addr,
+                                field_addr_ty,
+                                generator.next_name(&format!("bitcast_field_addr_{}_{}", cls.name, expr.fld.name))
+                            );
+
+                            let field_variable = Variable {
+                                name: expr.fld.name.clone(),
+                                ty: expr.fld.ty.borrow().as_ref().clone(),
+                                addr: RefCell::new(Some(field_addr)),
+                                refcount: RefCell::new(expr.fld.next_refcount()),
                             };
 
-                            unsafe {
-                                println!("Field Access: LLVMBuildGEP in {}", self);
-                                println!("field_idx: {}", field_idx);
-                                println!("LLVMTypeOf(obj_val)=");
-                                LLVMDumpType(LLVMTypeOf(obj_val));
-                                let field_addr = LLVMBuildGEP(
-                                    generator.builder,
-                                    obj_val,
-                                    generator.indices(vec![0, field_idx as i64]).as_mut_slice().as_mut_ptr() as *mut _,
-                                    2,
-                                    generator.next_name(&format!("gep_field_addr_{}_{}", cls.name, expr.fld.name))
-                                );
-                                let field_addr_ty = ptr_of!(field_ty);
-                                let field_addr = LLVMBuildBitCast(
-                                    generator.builder,
-                                    field_addr,
-                                    field_addr_ty,
-                                    generator.next_name(&format!("bitcast_field_addr_{}_{}", cls.name, expr.fld.name))
-                                );
-
-                                let field_variable = Variable {
-                                    name: expr.fld.name.clone(),
-                                    ty: expr.fld.ty.borrow().as_ref().clone(),
-                                    addr: RefCell::new(Some(field_addr)),
-                                    refcount: RefCell::new(expr.fld.next_refcount()),
-                                };
-
-                                Ok(CodeValue::Value(Addr(Rc::new(field_variable))))
-                            }
-                        } else {
-                            Err(ENonClassNotSupportMethodCall(format!("{}", expr.var)))
+                            Ok(CodeValue::Value(Addr(Rc::new(field_variable))))
                         }
                     }
                     _ => Err(EValueNotFound(format!("{}", self)))

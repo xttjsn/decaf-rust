@@ -12,8 +12,9 @@ class c {
       else {
 	 return 1;
        }
+	   return 0;
     }
 
-   public static void main() { }
+   public static void main(String[] argv) { }
 
 }

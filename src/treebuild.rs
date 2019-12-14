@@ -112,7 +112,7 @@ pub enum SemanticError {
 	EExprNotSupportArithOp,
 	EExprNotSupportLogicalOp,
 	EExprNotSupportCmpOp,
-	EExprNotCompatibleType,
+	EExprNotCompatibleType(String),
 	EVariableRedefinition,
 	EBlockStmtNotFound(String),
 	EStmtOrVecStmtNotFound,
@@ -151,6 +151,7 @@ pub enum SemanticError {
 	EArrayNegativeLevel,
 	EMethodCallWithoutMethod,
 	ENotInClassScope,
+	EInCompatibleReturn,
 }
 
 trait Normalize {
@@ -589,6 +590,7 @@ impl ASTBuilder for DecafTreeBuilder {
 		let objcls = Rc::new(Class::new("Object".to_string()));
 		let strcls = Rc::new(Class::new("String".to_string()));
 		let iocls = Rc::new(Class::new("IO".to_string()));
+		let arraycls = Rc::new(Class::new("Array".to_string()));
 
 		// No default methods for String
 		*strcls.sup.borrow_mut() = Some(objcls.clone());
@@ -672,6 +674,7 @@ impl ASTBuilder for DecafTreeBuilder {
 		self.class_map.insert("Object".to_string(), objcls);
 		self.class_map.insert("String".to_string(), strcls);
 		self.class_map.insert("IO".to_string(), iocls);
+		self.class_map.insert("Array".to_string(), arraycls);
 
 		// TODO: reset scopes
 	}
@@ -1158,12 +1161,12 @@ impl Visitor for DecafTreeBuilder {
 							_ => {
 								// check if the last statement is a return
 								if let Some(rty) = Block(blk.clone()).returnable() {
-									if rty.base == return_ty && rty.array_lvl == array_lvl {
+									if rty.is_compatible_with(&Type {base: return_ty, array_lvl}, false) {
 										*method.body.borrow_mut() = Some(blk);
 										Ok(Normal)
 									}
 									else {
-										Err(EMissingReturn)
+										Err(EInCompatibleReturn)
 									}
 								} else {
 									Err(EMissingReturn)
@@ -1257,7 +1260,7 @@ impl Visitor for DecafTreeBuilder {
 									}
 								}
 							}
-							false => Err(EExprNotCompatibleType)
+							false => Err(EExprNotCompatibleType(format!("lhs={}, rhs={}", lhs.get_type(), rhs.get_type())))
 						}
 					}
 					(Err(e), _) | (_, Err(e))=> Err(e)
@@ -1465,56 +1468,58 @@ impl Visitor for DecafTreeBuilder {
 								// Normalize vardecl
 								let (array_cnt, name, init_expr) = var_decl.normalize();
 
-								// Check for name conflict and add variable
-								match self.variable_lookup(name.clone()) {
-									Some(_) => {
-										return Err(EVariableRedefinition);
+								let real_ty = decaf::Type {
+									base: ty.base.clone(),
+									array_lvl: ty.array_lvl + array_cnt,
+								};
+
+								// Check if init_expr matches with type
+								match init_expr {
+									Some(init_expr) => {
+										match init_expr.accept(self) {
+											Ok(init_expr_v) => match init_expr_v {
+												ExprNode(init_expr_v) => {
+													let init_expr_ty = init_expr_v.get_type();
+													if init_expr_ty.is_compatible_with(&real_ty, false) {
+														self.variable_add(name.clone(), real_ty.clone());
+														res.push(Declare(decaf::DeclareStmt {
+															name: name.clone(),
+															ty: real_ty,
+															init_expr: Some(init_expr_v),
+														}));
+													} else {
+														return Err(EExprNotCompatibleType(format!("init_expr_ty: {}, real_ty:{}", init_expr_ty, real_ty)));
+													}
+												},
+												_ => return Err(EExprNodeNotFound(format!("decalre of {}", name)))
+											}
+											Err(e) => return Err(e)
+										}
 									}
 									None => {
-										let real_ty = decaf::Type {
-											base: ty.base.clone(),
-											array_lvl: ty.array_lvl + array_cnt,
-										};
+										if array_cnt > 0 {
+											return Err(EUninitializedArray);
+										} else {
+											self.variable_add(name.clone(), real_ty.clone());
+											res.push(Declare(decaf::DeclareStmt {
+												name: name.clone(),
+												ty: real_ty,
+												init_expr: None,
+											}));
+										}
 
-										// Check if init_expr matches with type
-										match init_expr {
-											Some(init_expr) => {
-												match init_expr.accept(self) {
-													Ok(init_expr_v) => match init_expr_v {
-														ExprNode(init_expr_v) => {
-															let init_expr_ty = init_expr_v.get_type();
-															if init_expr_ty.is_compatible_with(&real_ty, false) {
-																self.variable_add(name.clone(), real_ty.clone());
-																res.push(Declare(decaf::DeclareStmt {
-																	name: name.clone(),
-																	ty: real_ty,
-																	init_expr: Some(init_expr_v),
-																}));
-															} else {
-																return Err(EExprNotCompatibleType);
-															}
-														},
-														_ => return Err(EExprNodeNotFound(format!("decalre of {}", name)))
-													}
-													Err(e) => return Err(e)
-												}
-											}
-											None => {
-												if array_cnt > 0 {
-													return Err(EUninitializedArray);
-												} else {
-													self.variable_add(name.clone(), real_ty.clone());
-													res.push(Declare(decaf::DeclareStmt {
-														name: name.clone(),
-														ty: real_ty,
-														init_expr: None,
-													}));
-												}
-
-											}
-										};
 									}
-								}
+								};
+//								// Check for name conflict and add variable
+//
+//								match self.variable_lookup(name.clone()) {
+//									Some(_) => {
+//										//return Err(EVariableRedefinition);
+//									}
+//									None => {
+//
+//									}
+//								}
 							}
 							Ok(VecStmt(res))
 						}
@@ -2278,7 +2283,32 @@ impl Visitor for DecafTreeBuilder {
 														}
 													}
 												}
-												_ => Err(EPrimitiveTypeNoField)
+												_ => {
+													match ty.array_lvl {
+														0 => Err(EPrimitiveTypeNoField),
+														_ => {
+															if ty.array_lvl > 0 {
+																if id == "length" {
+																	// Only field "length"
+																	let fld = Rc::new(decaf::Field::new("length".into(), None));
+																	fld.set_base_type(Rc::new(decaf::Type {
+																		base: IntTy,
+																		array_lvl: 0
+																	}));
+																	Ok(ExprNode(FieldAccess(FieldAccessExpr {
+																		var: Box::new(prim_expr),
+																		cls: self.class_lookup("Array".into()).unwrap(),
+																		fld,
+																	})))
+																} else {
+																	Err(ENoCompatibleField)
+																}
+															} else {
+																Err(EArrayNegativeLevel)
+															}
+														}
+													}
+												}
 											}
 										}
 										_ => Err(EExprNodeNotFound(format!("Primary FieldExpr")))
