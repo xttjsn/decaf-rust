@@ -591,7 +591,7 @@ impl CodeGenerator {
                             println!("dst_llvm_ty: ");
                             LLVMDumpType(dst_llvm_ty); println!(" ");
                             match (&src_ty.base, &dst_ty.base) {
-                                (IntTy, ClassTy(_)) => {
+                                (IntTy, ClassTy(_)) | (NULLTy, ClassTy(_))=> {
                                     println!("build int to ptr");
                                     LLVMBuildIntToPtr(
                                         self.builder,
@@ -599,7 +599,7 @@ impl CodeGenerator {
                                         dst_llvm_ty,
                                         self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
                                 }
-                                (ClassTy(_), IntTy) => {
+                                (ClassTy(_), IntTy) | (ClassTy(_), NULLTy) => {
                                     println!("build ptr to int");
                                     LLVMBuildPtrToInt(
                                         self.builder,
