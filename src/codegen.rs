@@ -17,7 +17,6 @@ use llvm_sys::{
 use CodeValue::*;
 use CompileError::*;
 use DecafValue::*;
-use TypeSpecification::*;
 
 use self::llvm_sys::analysis::LLVMVerifierFailureAction::LLVMAbortProcessAction;
 use self::llvm_sys::analysis::LLVMVerifyModule;
@@ -30,7 +29,6 @@ use crate::decaf::{
 };
 use crate::shell;
 use crate::treebuild::Program;
-use crate::treebuild::SemanticError::EMissingReturn;
 use std::cell::RefCell;
 
 pub const ADDRESS_SPACE_GENERIC: ::libc::c_uint = 0;
@@ -54,8 +52,6 @@ pub const DECAF_MD_PRIV_METHOD_KIND: ::libc::c_uint = 6;
 pub const DECAF_MD_PUB_STATIC_KIND: ::libc::c_uint = 7;
 pub const DECAF_MD_PROT_STATIC_KIND: ::libc::c_uint = 8;
 pub const DECAF_MD_PRIV_STATIC_KIND: ::libc::c_uint = 9;
-const LLVM_FALSE: LLVMBool = 0;
-//const LLVM_TRUE: LLVMBool = 1;
 
 macro_rules! decaf_bool_type {
     () => {
@@ -274,13 +270,6 @@ enum GenState {
     First,
     Second,
     Third,
-}
-
-#[derive(PartialEq)]
-enum TypeSpecification {
-    Solid,
-    PtrIfClass,
-    PtrAll,
 }
 
 pub struct CodeGenerator {
@@ -560,7 +549,7 @@ impl CodeGenerator {
                     if src_ty.base != dst_ty.base {
                         unsafe {
                             let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
-                            let src_llvm_ty = self.ptr_if_class_or_array(src_ty);
+                            let _src_llvm_ty = self.ptr_if_class_or_array(src_ty);
 
                             match (&src_ty.base, &dst_ty.base) {
                                 (IntTy, ClassTy(_)) | (NULLTy, ClassTy(_)) => LLVMBuildIntToPtr(
@@ -628,7 +617,7 @@ impl CodeGenerator {
         None
     }
 
-    fn variable_add(&self, name: &str, var: Rc<Variable>) {
+    fn variable_add(&self, _name: &str, var: Rc<Variable>) {
         use crate::decaf::Scope::*;
         // The top most scope must be a block scope
         match self.scopes.last() {
@@ -2149,7 +2138,7 @@ impl CodeGen for decaf::Stmt {
             }
             Block(stmt) => {
                 generator.scopes.push(BlockScope(stmt.clone()));
-                for (ix, st) in stmt.stmts.borrow().iter().enumerate() {
+                for (_ix, st) in stmt.stmts.borrow().iter().enumerate() {
                     st.gencode(generator)?;
                     if let Some(_) = st.returnable() {
                         // No need to generate code for the rest
@@ -3081,7 +3070,7 @@ impl CodeGen for decaf::Expr {
                                     let virtual_table_global = generator
                                         .get_global_by_name(&vtable_name!(cls.name))
                                         .unwrap();
-                                    let virtual_table_ty = LLVMTypeOf(virtual_table_global);
+                                    let _virtual_table_ty = LLVMTypeOf(virtual_table_global);
                                     let func_val = generator
                                         .get_function_by_name(&expr.method.llvm_name())
                                         .unwrap();
@@ -3398,7 +3387,7 @@ impl CodeGen for decaf::Expr {
                 },
                 generator.get_llvm_type_by_name(&expr.cls.name).unwrap(),
             )),
-            NULL => unsafe {
+            NULL => {
                 Ok(CodeValue::Value(Val(
                     decaf::Type {
                         base: IntTy,

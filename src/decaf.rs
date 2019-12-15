@@ -158,10 +158,10 @@ impl fmt::Display for Stmt {
             Declare(stmt) => {
                 write!(f, "declare_of_{}_{}", stmt.ty, stmt.name)?;
             }
-            If(stmt) => {
+            If(_stmt) => {
                 write!(f, "if")?;
             }
-            IfElse(stmt) => {
+            IfElse(_stmt) => {
                 write!(f, "ifelse")?;
             }
             Expr(stmt) => {
@@ -178,10 +178,10 @@ impl fmt::Display for Stmt {
                     }
                 };
             }
-            Continue(stmt) => {
+            Continue(_stmt) => {
                 write!(f, "continue")?;
             }
-            Break(stmt) => {
+            Break(_stmt) => {
                 write!(f, "break")?;
             }
             Super(stmt) => {

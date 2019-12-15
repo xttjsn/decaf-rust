@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::decaf;
 use crate::decaf::{
     ArrayAccessExpr, AssignExpr, BinArithExpr, BinCmpExpr, BinLogicalExpr, ClassIdExpr,
-    ControlFlow, CreateArrayExpr, CreateObjExpr, Ctor, Expr::*, FieldAccessExpr, LiteralExpr::*,
+    ControlFlow, CreateArrayExpr, CreateObjExpr, Expr::*, FieldAccessExpr, LiteralExpr::*,
     MethodCallExpr, Scope::*, Stmt::*, SuperCallExpr, ThisExpr, Type, TypeBase::*, UnArithExpr,
     UnNotExpr, VTable, Value, VariableExpr, Visibility::*,
 };
@@ -19,9 +19,6 @@ use lnp::past::{
     AExpr::*, BinOp::*, Expr::*, FExpr::*, Litr::*, Modifier::*, NAExpr::*, NNAExpr::*, Prim::*,
     PrimitiveType::*, Stmt::*, UnOp::*,
 };
-
-use crate::codegen::LLVMName;
-use crate::lnp::past::Primary;
 
 macro_rules! debug {
 	() => (println!());
@@ -2171,7 +2168,7 @@ impl Visitor for DecafTreeBuilder {
                                             }
                                             _ => {
                                                 match self.get_top_most_ctor_scope() {
-                                                    Some(CtorScope(ctor)) => {
+                                                    Some(CtorScope(_ctor)) => {
                                                         match cls.get_compatible_level0_method(&arg_exprs, id) {
 														Some(method) => {
 															Ok(ExprNode(MethodCall(MethodCallExpr {
@@ -2616,7 +2613,7 @@ impl Visitor for DecafTreeBuilder {
                     }
                 }
                 _ => match self.get_top_most_ctor_scope() {
-                    Some(CtorScope(ctor)) => Ok(ExprNode(This(ThisExpr { cls }))),
+                    Some(CtorScope(_ctor)) => Ok(ExprNode(This(ThisExpr { cls }))),
                     _ => Err(EThisWithoutMethod),
                 },
             },

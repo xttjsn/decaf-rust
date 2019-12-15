@@ -3,12 +3,10 @@ pub mod lexer {
 
     use plex::lexer;
     use std::fmt;
-    use std::str::FromStr;
 
     #[derive(Debug, PartialEq)]
     enum TokenError {
         EscapeAtEndOfString,
-        InvalidEscapedChar(char),
     }
 
     struct InterpretEscapedString<'a> {
