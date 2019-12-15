@@ -353,6 +353,9 @@ impl PartialEq for TypeBase {
 				println!("Comparing class {} with class {}", cls_a.name, cls_b.name);
 				cls_a.name == cls_b.name
 			}
+			(UnknownTy(cls_a), UnknownTy(cls_b)) => {
+				cls_a.clone() == cls_b.clone()
+			}
 			_ => false
 		}
 	}
@@ -441,7 +444,7 @@ impl Method {
 		if self.name != other.name {
 			return false;
 		}
-		if self.return_ty != other.return_ty {
+		if *self.return_ty.borrow() != *other.return_ty.borrow() {
 			return false;
 		}
 		if self.args.borrow().len() != other.args.borrow().len() {

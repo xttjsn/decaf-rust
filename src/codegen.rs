@@ -566,36 +566,33 @@ impl CodeGenerator {
 
 	fn cast_value(&mut self, src_ty: &decaf::Type, dst_ty: &decaf::Type, val: LLVMValueRef) -> LLVMValueRef {
         println!("casting value");
-        unsafe {
-            let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
-            let src_llvm_ty = self.ptr_if_class_or_array(src_ty);
-            println!("testing trying to  cast src_ty: {} to dst_ty: {}", src_ty, dst_ty);
-            println!("src_llvm_ty: ");
-            LLVMDumpType(src_llvm_ty);
-            println!(" ");
-            println!("src_llvm_ty address space: {}", LLVMGetPointerAddressSpace(src_llvm_ty));
-            println!("dst_llvm_ty: ");
-            LLVMDumpType(dst_llvm_ty);
-            println!(" ");
-            println!("dst_llvm_ty address space: {}", LLVMGetPointerAddressSpace(dst_llvm_ty));
-            // Only cast pointer type
-            if src_ty.is_compatible_with(dst_ty, false) {
-                let is_ptr = {
-                    if src_ty.array_lvl > 0 {
-                        true
-                    } else if let ClassTy(_) = src_ty.base {
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if is_ptr {
-                    if src_ty.array_lvl == dst_ty.array_lvl {
-                        if src_ty.base != dst_ty.base {
+		// Only cast pointer type
+		if src_ty.is_compatible_with(dst_ty, false) {
+			let is_ptr = {
+				if src_ty.array_lvl > 0 {
+					true
+				} else if let ClassTy(_) = src_ty.base {
+					true
+				} else if let ClassTy(_) = dst_ty.base {
+                    true
+				} else {
+                    false
+                }
+			};
+			if is_ptr {
+				if src_ty.array_lvl == dst_ty.array_lvl {
+					if src_ty.base != dst_ty.base {
+                        unsafe {
+                            let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
+                            let src_llvm_ty = self.ptr_if_class_or_array(src_ty);
+                            println!("testing trying to  cast src_ty: {} to dst_ty: {}", src_ty, dst_ty);
+                            println!("src_llvm_ty: ");
+                            LLVMDumpType(src_llvm_ty); println!(" ");
+                            println!("dst_llvm_ty: ");
+                            LLVMDumpType(dst_llvm_ty); println!(" ");
                             match (&src_ty.base, &dst_ty.base) {
                                 (IntTy, ClassTy(_)) => {
-                                    println!("build int to ptr\n");
-                                    std::process::exit(2);
+                                    println!("build int to ptr");
                                     LLVMBuildIntToPtr(
                                         self.builder,
                                         val,
@@ -603,8 +600,7 @@ impl CodeGenerator {
                                         self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
                                 }
                                 (ClassTy(_), IntTy) => {
-                                    println!("build ptr to int\n");
-                                    std::process::exit(1);
+                                    println!("build ptr to int");
                                     LLVMBuildPtrToInt(
                                         self.builder,
                                         val,
@@ -612,8 +608,7 @@ impl CodeGenerator {
                                         self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
                                 }
                                 _ => {
-                                    println!("build {} to {}\n", src_ty, dst_ty);
-                                    std::process::exit(3);
+                                    println!("build {} to {}", src_ty, dst_ty);
                                     LLVMBuildPointerCast(
                                         self.builder,
                                         val,
@@ -621,19 +616,20 @@ impl CodeGenerator {
                                         self.next_name(&format!("cast_{}_{}", src_ty, dst_ty)))
                                 }
                             }
-                        } else {
-                            println!("Types {} and {} are equal", src_ty, dst_ty);
-                            val
                         }
-                    } else {
-                        panic!("casting will change array_lvl: src_type: {}, dst_type: {}", src_ty, dst_ty);
-                    }
+					} else {
+						val
+					}
+				} else {
+					panic!("casting will change array_lvl: src_type: {}, dst_type: {}", src_ty, dst_ty);
+				}
+			} else {
+                // Primitive type cast or equal type
+                if src_ty.base == dst_ty.base {
+                    val
                 } else {
-                    // Primitive type cast or equal type
-                    if src_ty.base == dst_ty.base {
-                        val
-                    } else {
-                        let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
+                    let dst_llvm_ty = self.ptr_if_class_or_array(dst_ty);
+                    unsafe {
                         LLVMBuildIntCast(
                             self.builder,
                             val,
@@ -642,10 +638,10 @@ impl CodeGenerator {
                         )
                     }
                 }
-            } else {
-                panic!("casting incompatible types. src_type: {}, dst_type: {}", src_ty, dst_ty);
-            }
-        }
+			}
+		} else {
+			panic!("casting incompatible types. src_type: {}, dst_type: {}", src_ty, dst_ty);
+		}
 	}
 
 	fn variable_lookup(&self, name: &str) -> Option<Rc<Variable>> {
@@ -1476,6 +1472,17 @@ impl CodeGenRc for decaf::Ctor {
                     }
                 } else {
                     println!("=========block is returnable========");
+
+                    // But we might still have to add a return
+                    unsafe {
+                        let last_inst = LLVMGetLastInstruction(LLVMGetInsertBlock(generator.builder));
+                        let is_term = LLVMIsATerminatorInst(last_inst);
+                        if is_term.is_null() {
+                            // Return a garbage value is fine
+                            let this_val =  LLVMGetFirstParam(ctor_llvm_val);
+                            LLVMBuildRet(generator.builder, this_val);
+                        }
+                    }
                 }
 
                 generator.scopes.pop();
@@ -1594,6 +1601,14 @@ impl CodeGenRc for decaf::Method {
                             }
                         } else {
                             println!("=========block is returnable========");
+                            // But we might still have to add a return
+                            unsafe {
+                                let last_inst = LLVMGetLastInstruction(LLVMGetInsertBlock(generator.builder));
+                                let is_term = LLVMIsATerminatorInst(last_inst);
+                                if is_term.is_null() {
+                                    LLVMBuildRetVoid(generator.builder);
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -1601,6 +1616,23 @@ impl CodeGenRc for decaf::Method {
                             return Err(EFunctionMissingReturn(format!("{}", self.name)));
                         } else {
                             println!("=========block is returnable========");
+                            unsafe {
+                                let last_inst = LLVMGetLastInstruction(LLVMGetInsertBlock(generator.builder));
+                                let no_ret = if last_inst.is_null() {
+                                    true
+                                } else {
+                                    let is_term = LLVMIsATerminatorInst(last_inst);
+                                    is_term.is_null() 
+                                };
+                                
+                                if no_ret {
+                                    // Return a garbage value is fine
+                                    let val = generator.const_i64(-1);
+                                    let casted_val = generator.cast_value(&(&IntTy).into(), 
+                                    self.return_ty.borrow().as_ref(), val);
+                                    LLVMBuildRet(generator.builder, casted_val);
+                                }
+                            }
                         }
                     }
                 }
@@ -2709,6 +2741,10 @@ impl CodeGen for decaf::Expr {
                                         generator.next_name(&format!("get_vtable_addr_{}", &expr.cls.name))
                                     );
                                     println!("CreateObject: LLVMBuildStore");
+                                    println!("Type of virtual_table_val: ");
+                                    LLVMDumpType(LLVMTypeOf(virtual_table_val));
+                                    println!("Type of virtual_table_addr: ");
+                                    LLVMDumpType(LLVMTypeOf(virtual_table_addr));
                                     LLVMBuildStore(
                                         generator.builder,
                                         virtual_table_val,
@@ -2737,6 +2773,13 @@ impl CodeGen for decaf::Expr {
                                     }
                                 }
                                 unsafe {
+                                    println!("Type of ctor_func_val: ");
+                                    LLVMDumpType(LLVMTypeOf(ctor_func_val));
+                                    for (ix, val) in arg_vals.iter().enumerate() {
+                                        println!("Type of the {}-th arg: ", ix);
+                                        LLVMDumpType(LLVMTypeOf(*val));
+                                    }
+
                                     Ok(CodeValue::Value(Val(
                                         decaf::Type {
                                             base: ClassTy(expr.cls.clone()),
@@ -3141,10 +3184,10 @@ impl CodeGen for decaf::Expr {
                 unsafe {
                     Ok(CodeValue::Value(Val(
                         decaf::Type {
-                            base: NULLTy,
+                            base: IntTy,
                             array_lvl: 0
                         },
-                        LLVMConstPointerNull(generator.int_type())
+                        generator.const_i64(-1)
                     )))
                 }
 			}
