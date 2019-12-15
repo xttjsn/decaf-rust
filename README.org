@@ -1,0 +1,45 @@
+* Decafc in Rust
+Decaf compiler for CS126
+
+It compiles decaf programs to llvm IR, and then executable of your
+host architecture.
+** Build Instruction
+*** Install rust _nightly_
+https://www.rust-lang.org/tools/install
+*** Install LLVM 8.0
+http://releases.llvm.org/
+Refer to https://gitlab.com/taricorp/llvm-sys.rs for build
+instructions
+*** Build 
+#+BEGIN_SRC bash
+$ cd decaf-rust
+$ LLVM_SYS_80_PREFIX={your llvm 8.0 installation path} cargo build
+#+END_SRC
+*** Test
+#+BEGIN_SRC 
+$ cd decaf-rust
+$ ./test.sh
+#+END_SRC
+
+All tests passed in Windows (LLVM built by msvc) as of 12/15/2019.
+** Run
+To compile example programs:
+#+BEGIN_SRC 
+$ cd decaf-rust
+$ cargo run examples/ekern.decaf
+$ ./ekern
+#+END_SRC
+
+** Files
+*** lnp.rs - Lexer aNd Parser
+*** treebuild.rs - AST builder (with decaf semantic)
+Use a two pass visitor pattern
+*** codegen.rs
+Use the AST from treebuild.rs to generate code.
+
+** Decaf Notes
+- `main` function must return void.
+- `main` function must accept `String[] argv`.
+- There can only be one `static void main String[] argv`.
+- Int can be casted to char, and vice versa.
+- Object can be casted to int, and vice versa (using its address).

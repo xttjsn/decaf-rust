@@ -115,7 +115,6 @@ fn main() {
     opts.optflag("h", "help", "print usage");
     opts.optflag("v", "version", "print decafc version");
     opts.optflag("", "dump-llvm", "print LLVM IR generated");
-    opts.optflag("", "dump-ast", "print decaf AST generated");
 
     opts.optopt("", "llvm-opt", "LLVM optimization level (0 to 3)", "LEVEL");
 
