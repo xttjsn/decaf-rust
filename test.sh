@@ -2,10 +2,7 @@
 FILES=./examples/*
 
 for f in $FILES
-
 do
 	echo "Compiling $f..."
-
-	cargo run < "$f" 1> /dev/null || exit;
-
+	./target/debug/decafc "$f" 1>/dev/null 2>/dev/null || exit;
 done

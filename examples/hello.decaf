@@ -7,7 +7,7 @@ class Animal {
 
 class Hello {
   Hello x;
-  public String main(String[] argv)
+  static void main(String[] argv)
   {
     IO.putString ("s");
 	int x = IO.getInt();

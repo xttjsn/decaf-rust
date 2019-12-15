@@ -779,7 +779,7 @@ impl Value for Expr {
 		use LiteralExpr::*;
 		// Perform no checks
 		match self {
-			Assign(_) => Type {base: VoidTy, array_lvl: 0},
+			Assign(expr) => expr.lhs.get_type(),
 			BinArith(_) => Type {base: IntTy, array_lvl: 0},
 			UnArith(_) => Type {base: IntTy, array_lvl: 0},
 			BinLogical(_) => Type {base: BoolTy, array_lvl: 0},

@@ -609,7 +609,7 @@ impl CodeGenerator {
                                 }
                                 _ => {
                                     println!("build {} to {}", src_ty, dst_ty);
-                                    LLVMBuildPointerCast(
+                                    LLVMBuildBitCast(
                                         self.builder,
                                         val,
                                         dst_llvm_ty,
@@ -965,7 +965,8 @@ impl CodeGenerator {
 							executable_path: &str
 	) -> Result<(), String> {
 		// Link the object file
-		let runtime_source = r#"
+        let runtime_source = if cfg!(windows) {
+			 r#"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1080,7 +1081,79 @@ int main(int argc, char** argv) {
 
     DECAF_MAIN(&arr);
 }
-"#;
+"#
+        } else {
+			 r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct String {
+	char* inner;
+};
+
+struct Array {
+	struct String** ptr;
+	long long length;
+};
+
+void DECAF_MAIN();
+
+void IO_putChar_inner(char c) {
+	putchar(c);
+	fflush(stdout);
+}
+
+void IO_putString_inner(char* s) {
+	printf("%s", s);
+	fflush(stdout);
+}
+
+void IO_putInt_inner(long long l) {
+	printf("%lld", l);
+	fflush(stdout);
+}
+
+char IO_getChar_inner() {
+    char c = getc(stdin);
+	return c;
+}
+
+char* IO_getLine_inner() {
+	// TODO: set size
+	char *line = NULL;
+	size_t sz = 0;
+	getline(&line, &sz, stdin);
+	return line;
+}
+
+long long IO_getInt_inner() {
+	long long l;
+	scanf("%lld", &l);
+	return l;
+}
+
+char IO_peek_inner() {
+	char c = getc(stdin);
+	ungetc(c, stdin);
+	return c;
+}
+
+int main(int argc, char** argv) {
+	struct String* argv_strings = malloc(sizeof(struct String) * argc);
+	for (int i = 0; i < argc; i++) {
+		argv_strings[i].inner = *(argv + i);
+	}
+
+
+	struct Array arr;
+	arr.ptr = &argv_strings;
+	arr.length = argc;
+
+    DECAF_MAIN(&arr);
+}
+"#
+		};
 		std::fs::write("./decaf_runtime.c", runtime_source).expect("Unable to write runtime");
 
 		let clang_args = if let Some(ref target_triple) = self.target_triple {

@@ -497,7 +497,8 @@ impl ASTBuilder for DecafTreeBuilder {
 		for scope in self.scopes.iter() {
 			match scope {
 				ClassScope(ref scls) => {
-					if scls == cls {
+					// if scls is equal to class or child class
+					if scls.is_subtype_of(cls) {
 						return true;
 					}
 				},
@@ -1535,7 +1536,10 @@ impl Visitor for DecafTreeBuilder {
 														StmtNode(thenstmt) => {
 															Ok(StmtNode(If(decaf::IfStmt{
 																cond: condexpr,
-																thenstmt: Box::new(thenstmt),
+																thenstmt: Box::new(Block(Rc::new(decaf::BlockStmt {
+																	vartbl: RefCell::new(vec![]),
+																	stmts: RefCell::new(vec![thenstmt])
+																}))),
 															})))
 														}
 														_ => Err(EStmtOrVecStmtNotFound)
@@ -1562,8 +1566,14 @@ impl Visitor for DecafTreeBuilder {
 												(StmtNode(thenstmt), StmtNode(elsestmt)) => {
 													Ok(StmtNode(IfElse(decaf::IfElseStmt {
 														cond: condexpr,
-														thenstmt: Box::new(thenstmt),
-														elsestmt: Box::new(elsestmt),
+														thenstmt: Box::new(Block(Rc::new(decaf::BlockStmt {
+															vartbl: RefCell::new(vec![]),
+															stmts: RefCell::new(vec![thenstmt])
+														}))),
+														elsestmt: Box::new(Block(Rc::new(decaf::BlockStmt {
+															vartbl: RefCell::new(vec![]),
+															stmts: RefCell::new(vec![elsestmt])
+														}))),
 													})))
 												}
 												_ => Err(EStmtNodeNotFound)

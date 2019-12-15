@@ -8,10 +8,11 @@ class Pascal {
     while (i < n1) {
       int j = 0;
       while (j < n2) {
-        if (i == 0 || j == 0)
-          tab[i][j] = 1;
+        if (i == 0 || j == 0) 
+		  tab[i][j] = 1;
         else
-          tab[i][j] = tab[i-1][j] + tab[i][j-1];
+		  tab[i][j] = tab[i-1][j] + tab[i][j-1];
+          
         j = j + 1;
       }
       i = i + 1;

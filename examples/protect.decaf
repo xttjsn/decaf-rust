@@ -2,7 +2,7 @@ class One{
    protected int f1;
 }
 
-class Two{
+class Two extends One{
    public void test(){
       One n1=new One();
       n1.f1=5;
@@ -10,8 +10,8 @@ class Two{
 }
 
 class A{
-   public static int main(String[] argv){
+   public static void main(String[] argv){
       Object[] x=argv;
-      return 0;
+      return;
     }
 }
